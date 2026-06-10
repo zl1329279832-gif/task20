@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>楼宇能耗分析系统</title>
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/components/sidebar.css">
+  <link rel="stylesheet" href="css/components/charts.css">
+  <link rel="stylesheet" href="css/components/alerts.css">
+  <link rel="stylesheet" href="css/components/import-dialog.css">
+  <link rel="stylesheet" href="css/components/scheme-manager.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">楼宇能耗分析系统</h1>
+    <div class="header-actions">
+      <button id="btn-import" class="btn btn-primary">导入数据</button>
+      <button id="btn-save-scheme" class="btn btn-outline">保存方案</button>
+      <button id="btn-load-scheme" class="btn btn-outline">加载方案</button>
+      <button id="btn-export" class="btn btn-accent">导出报告</button>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <!-- Sidebar filters -->
+    <aside id="sidebar" class="sidebar">
+      <div class="filter-group">
+        <label class="filter-label">选择楼栋</label>
+        <select id="filter-building" class="filter-select"><option value="">全部楼栋</option></select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">选择楼层</label>
+        <select id="filter-floor" class="filter-select"><option value="">全部楼层</option></select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">能耗类型</label>
+        <select id="filter-energy-type" class="filter-select">
+          <option value="total">总能耗</option>
+          <option value="ac">空调能耗</option>
+          <option value="lighting">照明能耗</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">计费口径</label>
+        <select id="filter-billing" class="filter-select">
+          <option value="tou">分时电价</option>
+          <option value="flat">统一电价</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">开始时间</label>
+        <input type="date" id="filter-start-date" class="filter-input">
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">结束时间</label>
+        <input type="date" id="filter-end-date" class="filter-input">
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">对比方式</label>
+        <select id="filter-comparison" class="filter-select">
+          <option value="mom">环比</option>
+          <option value="yoy">同比</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">排行数量</label>
+        <input type="number" id="filter-topn" class="filter-input" value="10" min="5" max="50">
+      </div>
+      <div class="data-summary" id="data-summary">
+        <h3>数据概览</h3>
+        <div class="summary-item"><span>楼栋</span><span id="summary-buildings">0</span></div>
+        <div class="summary-item"><span>设备</span><span id="summary-devices">0</span></div>
+        <div class="summary-item"><span>读数记录</span><span id="summary-readings">0</span></div>
+      </div>
+    </aside>
+
+    <!-- Main content area -->
+    <main class="main-content">
+      <div class="chart-grid">
+        <!-- Row 1: Building overview + Floor heatmap -->
+        <div class="chart-card chart-wide" id="card-building-overview">
+          <div class="chart-header"><h2>楼栋能耗总览</h2></div>
+          <div class="chart-body" id="chart-building-overview"></div>
+        </div>
+        <div class="chart-card" id="card-floor-heatmap">
+          <div class="chart-header"><h2>楼层热力图</h2></div>
+          <div class="chart-body" id="chart-floor-heatmap"></div>
+        </div>
+
+        <!-- Row 2: Device ranking + TOU trend -->
+        <div class="chart-card" id="card-device-ranking">
+          <div class="chart-header"><h2>设备能耗排行</h2></div>
+          <div class="chart-body" id="chart-device-ranking"></div>
+        </div>
+        <div class="chart-card" id="card-tou-trend">
+          <div class="chart-header"><h2>尖峰平谷用电趋势</h2></div>
+          <div class="chart-body" id="chart-tou-trend"></div>
+        </div>
+
+        <!-- Row 3: YoY/MoM comparison -->
+        <div class="chart-card chart-wide" id="card-yoy-mom">
+          <div class="chart-header"><h2>同比环比分析</h2></div>
+          <div class="chart-body" id="chart-yoy-mom"></div>
+        </div>
+
+        <!-- Row 4: Anomaly alerts + Suggestions -->
+        <div class="chart-card" id="card-anomaly">
+          <div class="chart-header"><h2>异常能耗提醒</h2><span class="badge" id="anomaly-count">0</span></div>
+          <div class="chart-body scrollable" id="chart-anomaly"></div>
+        </div>
+        <div class="chart-card" id="card-suggestions">
+          <div class="chart-header"><h2>节能建议</h2></div>
+          <div class="chart-body scrollable" id="chart-suggestions"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Import Dialog -->
+  <div class="modal-overlay" id="import-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>导入数据</h2>
+        <button class="modal-close" id="import-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="import-tabs">
+          <button class="tab-btn active" data-type="buildings">楼栋</button>
+          <button class="tab-btn" data-type="floors">楼层</button>
+          <button class="tab-btn" data-type="rooms">房间</button>
+          <button class="tab-btn" data-type="devices">设备</button>
+          <button class="tab-btn" data-type="meter_readings">电表读数</button>
+          <button class="tab-btn" data-type="ac_energy">空调能耗</button>
+          <button class="tab-btn" data-type="lighting_energy">照明能耗</button>
+          <button class="tab-btn" data-type="tou_pricing">分时电价</button>
+        </div>
+        <div class="import-dropzone" id="import-dropzone">
+          <p>拖拽 CSV/JSON 文件到此处，或点击选择文件</p>
+          <input type="file" id="import-file-input" accept=".csv,.json" multiple hidden>
+        </div>
+        <div class="import-progress" id="import-progress" hidden>
+          <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+          <p id="progress-text">正在解析...</p>
+        </div>
+        <div class="import-preview" id="import-preview" hidden>
+          <h3>字段映射预览</h3>
+          <div id="field-mapping-table"></div>
+          <div class="import-errors" id="import-errors" hidden>
+            <h3>校验问题</h3>
+            <div id="error-list"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" id="btn-import-cancel">取消</button>
+        <button class="btn btn-primary" id="btn-import-confirm" disabled>确认导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scheme Dialog -->
+  <div class="modal-overlay" id="scheme-modal">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2 id="scheme-modal-title">保存分析方案</h2>
+        <button class="modal-close" id="scheme-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="scheme-save-form">
+          <div class="form-group">
+            <label>方案名称</label>
+            <input type="text" id="scheme-name" class="filter-input" placeholder="输入方案名称">
+          </div>
+        </div>
+        <div id="scheme-list" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" id="btn-scheme-cancel">取消</button>
+        <button class="btn btn-primary" id="btn-scheme-confirm">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tooltip -->
+  <div class="tooltip" id="global-tooltip" hidden></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

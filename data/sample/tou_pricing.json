@@ -1,0 +1,11 @@
+[
+  { "time_period": "sharp",  "start_time": "10:00", "end_time": "12:00", "price_per_kwh": 1.42 },
+  { "time_period": "sharp",  "start_time": "19:00", "end_time": "21:00", "price_per_kwh": 1.42 },
+  { "time_period": "peak",   "start_time": "08:00", "end_time": "10:00", "price_per_kwh": 1.02 },
+  { "time_period": "peak",   "start_time": "12:00", "end_time": "17:00", "price_per_kwh": 1.02 },
+  { "time_period": "peak",   "start_time": "21:00", "end_time": "23:00", "price_per_kwh": 1.02 },
+  { "time_period": "flat",   "start_time": "07:00", "end_time": "08:00", "price_per_kwh": 0.62 },
+  { "time_period": "flat",   "start_time": "17:00", "end_time": "19:00", "price_per_kwh": 0.62 },
+  { "time_period": "flat",   "start_time": "23:00", "end_time": "24:00", "price_per_kwh": 0.62 },
+  { "time_period": "valley", "start_time": "00:00", "end_time": "07:00", "price_per_kwh": 0.32 }
+]

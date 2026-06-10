@@ -135,4 +135,142 @@
  * const storage = window._energyApp.storage;
  * const fp = await storage.computeDataFingerprint();
  * console.log('fingerprint:', JSON.stringify(fp, null, 2));
+ *
+ * ============================================================
+ * 测试场景 6: 碳排放与需量电费面板
+ * ============================================================
+ *
+ * 步骤:
+ *   1. 启动系统, 等待演示数据加载完成
+ *   2. 切换到「分析仪表盘」
+ *   3. 检查看板中是否出现「碳排放趋势」和「需量电费」图表
+ *   4. 快速切换楼栋: B001 → B002 → B003 → 全部
+ *
+ * 预期:
+ *   - 碳排放趋势图按楼栋显示堆叠柱状图, 叠加碳因子折线
+ *   - 需量电费图按月显示柱状图, 标注峰值需量
+ *   - 快速切换后只显示最终筛选结果, 不出现混合数据
+ *   - DevTools 执行:
+ *     const dc = window._energyApp.dashboardController;
+ *     console.log('carbon data:', dc.data.carbonFactors?.length);
+ *     console.log('demand data:', dc.data.demandPricing?.length);
+ *
+ * ============================================================
+ * 测试场景 7: 碳排因子重复导入
+ * ============================================================
+ *
+ * 步骤:
+ *   1. 切换到「数据导入」
+ *   2. 选择「碳排因子」类型, 导入 data/sample-carbon-factors.csv
+ *   3. 确认导入成功 (toast 提示)
+ *   4. 再次导入同一个文件
+ *   5. 打开 DevTools → Application → IndexedDB → carbon_factors
+ *
+ * 预期:
+ *   - 重复导入后 carbon_factors store 中只有 24 条记录(非 48 条)
+ *   - 字段映射置信度全部为「高」
+ *   - 看板碳排数据正常更新
+ *
+ * ============================================================
+ * 测试场景 8: 削峰填谷策略创建与对比
+ * ============================================================
+ *
+ * 步骤:
+ *   1. 进入「分析仪表盘」
+ *   2. 在策略沙盘面板点击「新建策略」
+ *   3. 填写: 名称="夜间迁移", 目标=碳排+成本
+ *   4. 添加规则: 设备=M-B001-F1-R1-ac, 源时段=9,10,11, 目标时段=0,1,2, 迁移比例=50%
+ *   5. 点击保存
+ *   6. 观察策略模拟结果(碳减排、费用节省)
+ *   7. 在策略下拉框中选择该策略, 点击激活
+ *   8. 观察趋势图/热力图/排行是否反映策略调整
+ *   9. 创建第二个策略, 不同参数
+ *   10. 点击「策略对比」, 勾选两个策略, 点击对比
+ *
+ * 预期:
+ *   - 策略保存后下拉框出现新策略
+ *   - 激活策略后筛选栏显示「策略激活中」指示器
+ *   - 趋势图/热力图反映迁移后的能耗分布
+ *   - 负荷转移图显示原始和迁移后的 24h 曲线
+ *   - 对比卡片正确显示 baseline vs 各策略的碳排/成本/减排%
+ *   - 点击「关闭」按钮取消策略叠加, 恢复原始数据
+ *
+ * ============================================================
+ * 测试场景 9: 策略对比中数据变更警告
+ * ============================================================
+ *
+ * 步骤:
+ *   1. 创建策略 "策略A", 保存
+ *   2. 切换到「数据导入」, 导入新的 meter_readings 数据
+ *   3. 回到仪表盘, 创建策略 "策略B"
+ *   4. 点击「策略对比」, 勾选 A 和 B
+ *
+ * 预期:
+ *   - 对比结果中 "策略A" 旁有 ⚠ 指纹不一致警告
+ *   - 对比面板顶部显示指纹警告提示
+ *   - "策略B" 无警告(与当前数据一致)
+ *
+ * ============================================================
+ * 测试场景 10: 过期 Worker 回包丢弃(碳排/策略任务)
+ * ============================================================
+ *
+ * 步骤:
+ *   1. 进入仪表盘, 等待碳排趋势图渲染
+ *   2. 快速连续执行: 导入新数据 → 立即切回仪表盘
+ *   3. 观察碳排趋势图和需量电费图
+ *
+ * 预期:
+ *   - 不出现旧数据的碳排结果(已被 sessionVersion 机制丢弃)
+ *   - 图表显示新数据的计算结果
+ *   - DevTools 执行:
+ *     const wm = window._energyApp.workerManager;
+ *     console.log('session:', wm.getSessionVersion());
+ *     // 应 > 0, 表示 session 已推进
+ *
+ * ============================================================
+ * 测试场景 11: 导出报告含碳排/策略章节
+ * ============================================================
+ *
+ * 步骤:
+ *   1. 创建并激活一个策略
+ *   2. 等待看板完全渲染(含策略叠加效果)
+ *   3. 点击「导出报告」
+ *   4. 打开导出的 HTML 文件
+ *
+ * 预期:
+ *   - 报告包含「碳排放分析」章节, 含按时段和按楼栋的碳排表格
+ *   - 报告包含「需量电费分析」章节, 含峰值需量和费用
+ *   - 报告包含「削峰填谷策略效果」章节, 含碳减排/费用节省/迁移详情
+ *   - 数据总览卡片包含"总碳排放"和"需量电费"
+ *   - 底部追溯信息(数据版本、查询ID、筛选校验码)存在
+ *
+ * ============================================================
+ * 快速验证命令 — 碳排/策略 (DevTools Console)
+ * ============================================================
+ *
+ * // 检查碳排数据
+ * const dc = window._energyApp.dashboardController;
+ * console.log('carbon factors loaded:', dc.data.carbonFactors?.length);
+ * console.log('demand pricing loaded:', dc.data.demandPricing?.length);
+ * console.log('shiftable loads loaded:', dc.data.shiftableLoads?.length);
+ *
+ * // 检查策略控制器
+ * const sc = window._energyApp.strategyController;
+ * console.log('active strategy:', sc?.activeStrategy?.name);
+ * console.log('active result:', !!sc?.activeResult);
+ *
+ * // 手动运行碳排计算
+ * const cs = EnergyApp.CarbonStrategy;
+ * const carbonResult = cs.calculateBuildingCarbon(
+ *   dc.data.readings, dc.data.carbonFactors,
+ *   window._energyApp.filter.get()
+ * );
+ * console.log('total carbon:', carbonResult.totalCarbon);
+ * console.log('by building:', carbonResult.byBuilding);
+ *
+ * // 检查报告数据含碳排
+ * const report = dc.getReportData();
+ * console.log('report has carbon:', !!report.carbonData);
+ * console.log('report has demand:', !!report.demandData);
+ * console.log('report has strategy:', !!report.strategyResult);
  */

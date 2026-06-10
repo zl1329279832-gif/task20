@@ -122,11 +122,11 @@ EnergyApp.ImportController = class ImportController {
             const out = {};
             Object.entries(mapping).forEach(([field, info]) => {
                 let val = row[info.header];
-                if (['reading','energy','power','price','area','rated_power','temperature','runtime','brightness'].includes(field))
+                if (['reading','energy','power','price','area','rated_power','temperature','runtime','brightness','emission_factor','shiftable_power_kw','price_per_kw','threshold_kw','min_duration_hours'].includes(field))
                     val = Number(String(val || '').replace(/,/g, '')) || 0;
-                else if (['timestamp','effective_date','install_date'].includes(field)) {
+                else if (['timestamp','effective_date','install_date','earliest_start','latest_end'].includes(field)) {
                     const d = new Date(val); if (!isNaN(d.getTime())) val = d.toISOString();
-                } else if (['floors','floor_number'].includes(field))
+                } else if (['floors','floor_number','priority','demand_tier'].includes(field))
                     val = parseInt(val, 10) || 0;
                 out[field] = val != null ? val : '';
             });
@@ -152,7 +152,7 @@ EnergyApp.ImportController = class ImportController {
         this._showLoading('正在导入...');
         try {
             for (const r of this.parsedData) {
-                const storeMap = { building: 'buildings', floor: 'floors', room: 'rooms', device: 'devices', meter_reading: 'meter_readings', ac_energy: 'ac_energy', lighting_energy: 'lighting_energy', pricing: 'pricing' };
+                const storeMap = { building: 'buildings', floor: 'floors', room: 'rooms', device: 'devices', meter_reading: 'meter_readings', ac_energy: 'ac_energy', lighting_energy: 'lighting_energy', pricing: 'pricing', carbon_factor: 'carbon_factors', demand_pricing: 'demand_pricing', shiftable_load: 'shiftable_loads' };
                 const storeName = storeMap[r.dataType] || r.dataType;
                 const converted = this._convertRows(r.parsed.rows, r.mapping.mapping);
                 if (converted.length > 0) { await this.db.clear(storeName); await this.db.bulkAdd(storeName, converted); }

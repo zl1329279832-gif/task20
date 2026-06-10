@@ -7,7 +7,7 @@ EnergyApp.Storage = class Storage {
 
     /* ---- 生成数据指纹: 各 store 的记录数 + 采样哈希 ---- */
     async computeDataFingerprint() {
-        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing'];
+        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing','carbon_factors','demand_pricing','shiftable_loads'];
         const fp = {};
         for (const store of stores) {
             try {
@@ -32,7 +32,7 @@ EnergyApp.Storage = class Storage {
     /* ---- 指纹比对 ---- */
     compareFingerprint(savedFp, currentFp) {
         if (!savedFp || !currentFp) return { match: false, reason: '缺少指纹数据' };
-        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing'];
+        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing','carbon_factors','demand_pricing','shiftable_loads'];
         for (const store of stores) {
             const s = savedFp[store] || { count: 0 };
             const c = currentFp[store] || { count: 0 };
@@ -86,4 +86,21 @@ EnergyApp.Storage = class Storage {
         const pref = await this.db.get('preferences', key);
         return pref ? pref.value : null;
     }
+
+    /* ---- 策略持久化 ---- */
+    async saveStrategy(strategy) {
+        strategy.updatedAt = new Date().toISOString();
+        if (!strategy.createdAt) strategy.createdAt = strategy.updatedAt;
+        await this.db.put('strategies', strategy);
+        return strategy;
+    }
+
+    async getAllStrategies() {
+        const all = await this.db.getAll('strategies');
+        return all.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    }
+
+    async getStrategy(strategyId) { return await this.db.get('strategies', strategyId); }
+
+    async deleteStrategy(strategyId) { await this.db.delete('strategies', strategyId); }
 };

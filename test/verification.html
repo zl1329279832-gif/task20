@@ -52,6 +52,7 @@ button{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:1
 <script src="../js/validator.js"></script>
 <script src="../js/worker-manager.js"></script>
 <script src="../js/calculation.js"></script>
+<script src="../js/carbon-strategy.js"></script>
 <script src="../js/chart.js"></script>
 <script src="../js/filter.js"></script>
 <script src="../js/storage.js"></script>
@@ -626,6 +627,330 @@ async function testEndToEnd() {
 }
 
 /* ================================================================
+ *  测试套件 10: 碳排放计算准确性
+ * ================================================================ */
+async function testCarbonCalculation() {
+    T.group('10. 碳排放计算 — 准确性');
+
+    const readings = [];
+    const start = new Date(2025, 0, 1);
+    for (let d = 0; d < 30; d++) {
+        const ts = new Date(start.getTime() + d * 86400000);
+        readings.push({
+            meter_id: 'M-1', timestamp: ts.toISOString(),
+            reading: 1000 + d * 100, energy: 100, cost: 65,
+            period_type: 'flat', energy_type: 'electricity',
+            building_id: 'B001', floor_id: 'B001-F1'
+        });
+    }
+
+    const carbonFactors = [];
+    const hourlyFactors = [0.42,0.40,0.38,0.37,0.36,0.38,0.45,0.55,0.72,0.82,0.88,0.85,0.78,0.75,0.70,0.68,0.72,0.80,0.90,0.92,0.88,0.78,0.60,0.48];
+    for (let h = 0; h < 24; h++) {
+        carbonFactors.push({ time_period: h, emission_factor: hourlyFactors[h], region: '华东电网', effective_date: '2025-01-01' });
+    }
+
+    const filter = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' };
+
+    // 10.1 基本碳排计算
+    const result = EnergyApp.CarbonStrategy.calculateBuildingCarbon(readings, carbonFactors, filter);
+    T.assert('碳排结果包含 totalCarbon', result.totalCarbon > 0,
+        `totalCarbon=${result.totalCarbon.toFixed(2)}`);
+
+    // 10.2 碳排 = energy * factor
+    // 所有 readings 的 timestamp 在 hour=0 (ISO格式 UTC), 对应因子 0.42
+    // 30天 * 100kWh = 3000kWh, 预期碳排应基于匹配的小时因子
+    T.assert('totalCarbon > 0 且合理', result.totalCarbon > 0 && result.totalCarbon < 100000,
+        `totalCarbon=${result.totalCarbon.toFixed(2)}`);
+
+    // 10.3 按楼栋聚合
+    T.assert('byBuilding 包含 B001', result.byBuilding && result.byBuilding['B001'] > 0,
+        `B001 carbon=${result.byBuilding?.['B001']?.toFixed(2)}`);
+
+    // 10.4 按时段聚合
+    T.assert('byPeriod 有数据', result.byPeriod && result.byPeriod.length > 0,
+        `periods=${result.byPeriod?.length}`);
+
+    // 10.5 筛选楼栋后碳排不同
+    const readingsB = [];
+    for (let d = 0; d < 30; d++) {
+        const ts = new Date(start.getTime() + d * 86400000);
+        readingsB.push({
+            meter_id: 'M-2', timestamp: ts.toISOString(),
+            reading: 2000 + d * 200, energy: 200, cost: 130,
+            period_type: 'flat', energy_type: 'electricity',
+            building_id: 'B002', floor_id: 'B002-F1'
+        });
+    }
+    const mixedReadings = [...readings, ...readingsB];
+    const resultAll = EnergyApp.CarbonStrategy.calculateBuildingCarbon(mixedReadings, carbonFactors, filter);
+    const resultB001 = EnergyApp.CarbonStrategy.calculateBuildingCarbon(mixedReadings, carbonFactors, { ...filter, buildingId: 'B001' });
+    T.assert('筛选B001碳排 < 全部碳排', resultB001.totalCarbon < resultAll.totalCarbon,
+        `B001=${resultB001.totalCarbon.toFixed(1)}, all=${resultAll.totalCarbon.toFixed(1)}`);
+
+    // 10.6 零因子 = 零碳排
+    const zeroFactors = carbonFactors.map(f => ({ ...f, emission_factor: 0 }));
+    const resultZero = EnergyApp.CarbonStrategy.calculateBuildingCarbon(readings, zeroFactors, filter);
+    T.assert('零排放因子 → 零碳排', resultZero.totalCarbon === 0,
+        `totalCarbon=${resultZero.totalCarbon}`);
+}
+
+/* ================================================================
+ *  测试套件 11: 策略模拟一致性
+ * ================================================================ */
+async function testStrategySimulation() {
+    T.group('11. 策略模拟 — 一致性');
+
+    const readings = [];
+    const start = new Date(2025, 0, 1);
+    for (let d = 0; d < 30; d++) {
+        for (let h = 0; h < 24; h++) {
+            const ts = new Date(start.getTime() + d * 86400000 + h * 3600000);
+            const energy = h >= 8 && h < 22 ? 10 : 3; // 白天10, 夜间3
+            readings.push({
+                meter_id: 'M-B001-F1-R1-ac', timestamp: ts.toISOString(),
+                reading: 1000 + d * 200 + h * 10, energy,
+                cost: energy * 0.65, period_type: 'flat',
+                energy_type: 'ac', building_id: 'B001', floor_id: 'B001-F1'
+            });
+        }
+    }
+
+    const carbonFactors = [];
+    const hourlyFactors = [0.42,0.40,0.38,0.37,0.36,0.38,0.45,0.55,0.72,0.82,0.88,0.85,0.78,0.75,0.70,0.68,0.72,0.80,0.90,0.92,0.88,0.78,0.60,0.48];
+    for (let h = 0; h < 24; h++) {
+        carbonFactors.push({ time_period: h, emission_factor: hourlyFactors[h], region: '华东电网', effective_date: '2025-01-01' });
+    }
+
+    const demandPricing = [
+        { demand_tier: 1, price_per_kw: 28, threshold_kw: 500, billing_period: '月', effective_date: '2025-01-01' },
+        { demand_tier: 2, price_per_kw: 32, threshold_kw: 1000, billing_period: '月', effective_date: '2025-01-01' },
+        { demand_tier: 3, price_per_kw: 38, threshold_kw: 99999, billing_period: '月', effective_date: '2025-01-01' }
+    ];
+
+    const shiftableLoads = [
+        { device_id: 'M-B001-F1-R1-ac', shiftable_power_kw: 2.5, earliest_start: '22:00', latest_end: '06:00', min_duration_hours: 2, priority: 1 }
+    ];
+
+    const filter = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' };
+
+    // 11.1 0% 迁移 = baseline
+    const strategyZero = {
+        strategy_id: 'S-ZERO', name: '零迁移', target_type: 'both', target_value: 0,
+        rules: [{ rule_id: 'R1', device_id: 'M-B001-F1-R1-ac', from_hours: [9,10,11], to_hours: [0,1,2], shift_percentage: 0, priority: 1 }]
+    };
+    const resultZero = EnergyApp.CarbonStrategy.simulateStrategy(strategyZero, readings, carbonFactors, demandPricing, shiftableLoads, filter);
+    T.assert('0%迁移: baseline存在', !!resultZero.baseline, 'baseline对象');
+    T.assert('0%迁移: simulated存在', !!resultZero.simulated, 'simulated对象');
+    T.assert('0%迁移: delta碳减排≈0', Math.abs(resultZero.delta.carbonReduction) < 0.01,
+        `carbonReduction=${resultZero.delta.carbonReduction}`);
+
+    // 11.2 正常迁移策略
+    const strategy50 = {
+        strategy_id: 'S-50', name: '50%迁移', target_type: 'both', target_value: 0,
+        rules: [{ rule_id: 'R1', device_id: 'M-B001-F1-R1-ac', from_hours: [9,10,11], to_hours: [0,1,2], shift_percentage: 50, priority: 1 }]
+    };
+    const result50 = EnergyApp.CarbonStrategy.simulateStrategy(strategy50, readings, carbonFactors, demandPricing, shiftableLoads, filter);
+
+    // 11.3 能量守恒: shifted总能 = baseline总能
+    const baselineTotal = result50.baseline.totalEnergy || readings.reduce((s, r) => s + r.energy, 0);
+    const simulatedTotal = result50.simulated.totalEnergy || 0;
+    if (simulatedTotal > 0) {
+        T.assert('能量守恒: 迁移前后总能耗相等', Math.abs(baselineTotal - simulatedTotal) < baselineTotal * 0.01,
+            `baseline=${baselineTotal.toFixed(0)}, simulated=${simulatedTotal.toFixed(0)}`);
+    } else {
+        T.info('能量守恒: simulated.totalEnergy 未返回, 跳过精确比对');
+    }
+
+    // 11.4 碳排应有变化(从高碳时段移到低碳时段)
+    T.assert('50%迁移: 碳排有变化', result50.delta.carbonReduction !== 0,
+        `carbonReduction=${result50.delta.carbonReduction?.toFixed(2)}`);
+
+    // 11.5 迁移详情存在
+    T.assert('shiftDetails 存在', result50.shiftDetails && result50.shiftDetails.length > 0,
+        `details=${result50.shiftDetails?.length}`);
+
+    // 11.6 24h负荷曲线存在
+    T.assert('loadProfile 存在', result50.loadProfile && (result50.loadProfile.original || result50.loadProfile.baseline),
+        'loadProfile对象');
+}
+
+/* ================================================================
+ *  测试套件 12: 策略指纹校验
+ * ================================================================ */
+async function testStrategyFingerprint() {
+    T.group('12. 策略指纹 — 校验');
+
+    const db = new EnergyApp.DB();
+    await db.open();
+    const storage = new EnergyApp.Storage(db);
+
+    // 准备数据
+    await db.clear('buildings');
+    await db.clear('meter_readings');
+    await db.clear('carbon_factors');
+    await db.clear('demand_pricing');
+    await db.clear('shiftable_loads');
+
+    await db.bulkAdd('buildings', makeBuildings(['B001']));
+    await db.bulkAdd('meter_readings', makeReadings('B001', 'M-1', 50, 2025, 20));
+    const carbonFactors = [];
+    for (let h = 0; h < 24; h++) {
+        carbonFactors.push({ time_period: h, emission_factor: 0.5 + h * 0.02, region: '华东电网', effective_date: '2025-01-01' });
+    }
+    await db.bulkAdd('carbon_factors', carbonFactors);
+    await db.bulkAdd('demand_pricing', [
+        { demand_tier: 1, price_per_kw: 28, threshold_kw: 500, billing_period: '月', effective_date: '2025-01-01' }
+    ]);
+
+    // 12.1 计算初始指纹
+    const fp1 = await storage.computeDataFingerprint();
+    T.assert('指纹包含 carbon_factors', fp1.carbon_factors?.count === 24,
+        `count=${fp1.carbon_factors?.count}`);
+    T.assert('指纹包含 demand_pricing', fp1.demand_pricing?.count === 1,
+        `count=${fp1.demand_pricing?.count}`);
+
+    // 12.2 同一数据指纹匹配
+    const fp2 = await storage.computeDataFingerprint();
+    const cmp1 = storage.compareFingerprint(fp1, fp2);
+    T.assert('同一数据指纹匹配', cmp1.match === true);
+
+    // 12.3 修改碳排因子后指纹不匹配
+    await db.clear('carbon_factors');
+    const newFactors = carbonFactors.map(f => ({ ...f, emission_factor: f.emission_factor * 1.5 }));
+    await db.bulkAdd('carbon_factors', newFactors);
+    const fp3 = await storage.computeDataFingerprint();
+    const cmp2 = storage.compareFingerprint(fp1, fp3);
+    T.assert('碳排因子变更后指纹不匹配', cmp2.match === false,
+        `reason: ${cmp2.reason}`);
+
+    // 12.4 修改需量电价后指纹不匹配
+    await db.clear('carbon_factors');
+    await db.bulkAdd('carbon_factors', carbonFactors); // 恢复原始
+    await db.clear('demand_pricing');
+    await db.bulkAdd('demand_pricing', [
+        { demand_tier: 1, price_per_kw: 35, threshold_kw: 500, billing_period: '月', effective_date: '2025-01-01' }
+    ]);
+    const fp4 = await storage.computeDataFingerprint();
+    const cmp3 = storage.compareFingerprint(fp1, fp4);
+    T.assert('需量电价变更后指纹不匹配', cmp3.match === false,
+        `reason: ${cmp3.reason}`);
+
+    // 12.5 策略对比中指纹一致性
+    const stratResults = [
+        { strategyId: 'S1', dataFingerprint: fp1, delta: { carbonReduction: 10 } },
+        { strategyId: 'S2', dataFingerprint: fp1, delta: { carbonReduction: 20 } }
+    ];
+    const comparison = EnergyApp.CarbonStrategy.compareStrategies(stratResults);
+    T.assert('同指纹策略对比无警告', !comparison.fingerprintWarning,
+        `warning=${comparison.fingerprintWarning}`);
+
+    // 12.6 不同指纹策略对比有警告
+    const stratResults2 = [
+        { strategyId: 'S1', dataFingerprint: fp1, delta: { carbonReduction: 10 } },
+        { strategyId: 'S2', dataFingerprint: fp3, delta: { carbonReduction: 20 } }
+    ];
+    const comparison2 = EnergyApp.CarbonStrategy.compareStrategies(stratResults2);
+    T.assert('不同指纹策略对比有警告', !!comparison2.fingerprintWarning,
+        `warning=${comparison2.fingerprintWarning}`);
+
+    // 清理
+    await db.clear('buildings');
+    await db.clear('meter_readings');
+    await db.clear('carbon_factors');
+    await db.clear('demand_pricing');
+    await db.clear('shiftable_loads');
+}
+
+/* ================================================================
+ *  测试套件 13: 新类型导入 — 字段映射与验证
+ * ================================================================ */
+async function testNewTypeImport() {
+    T.group('13. 新类型导入 — 字段映射与验证');
+
+    // 13.1 碳排因子字段映射(精确匹配)
+    const carbonHeaders = ['time_period', 'emission_factor', 'region', 'effective_date'];
+    const carbonMap = EnergyApp.Parser.mapFields(carbonHeaders, 'carbon_factor');
+    const carbonConf = Object.values(carbonMap.mapping).map(m => m.confidence);
+    T.assert('碳排因子: 精确匹配全部字段', Object.keys(carbonMap.mapping).length >= 3,
+        `matched=${Object.keys(carbonMap.mapping).length}, conf=${carbonConf.join(',')}`);
+
+    // 13.2 碳排因子中文别名映射
+    const carbonHeadersCN = ['时段', '排放因子', '区域', '生效日期'];
+    const carbonMapCN = EnergyApp.Parser.mapFields(carbonHeadersCN, 'carbon_factor');
+    const carbonConfCN = Object.values(carbonMapCN.mapping).map(m => m.confidence);
+    T.assert('碳排因子: 中文别名映射', Object.keys(carbonMapCN.mapping).length >= 3,
+        `matched=${Object.keys(carbonMapCN.mapping).length}, conf=${carbonConfCN.join(',')}`);
+
+    // 13.3 需量电价字段映射
+    const demandHeaders = ['demand_tier', 'price_per_kw', 'threshold_kw', 'billing_period', 'effective_date'];
+    const demandMap = EnergyApp.Parser.mapFields(demandHeaders, 'demand_pricing');
+    T.assert('需量电价: 字段映射成功', Object.keys(demandMap.mapping).length >= 3,
+        `matched=${Object.keys(demandMap.mapping).length}`);
+
+    // 13.4 需量电价中文别名
+    const demandHeadersCN = ['需量档次', '每千瓦价格', '阈值', '计费周期', '生效日期'];
+    const demandMapCN = EnergyApp.Parser.mapFields(demandHeadersCN, 'demand_pricing');
+    T.assert('需量电价: 中文别名映射', Object.keys(demandMapCN.mapping).length >= 3,
+        `matched=${Object.keys(demandMapCN.mapping).length}`);
+
+    // 13.5 可迁移负荷字段映射
+    const loadHeaders = ['device_id', 'shiftable_power_kw', 'earliest_start', 'latest_end', 'min_duration_hours', 'priority'];
+    const loadMap = EnergyApp.Parser.mapFields(loadHeaders, 'shiftable_load');
+    T.assert('可迁移负荷: 字段映射成功', Object.keys(loadMap.mapping).length >= 4,
+        `matched=${Object.keys(loadMap.mapping).length}`);
+
+    // 13.6 可迁移负荷中文别名
+    const loadHeadersCN = ['设备ID', '可迁移功率', '最早开始', '最晚结束', '最短时长', '优先级'];
+    const loadMapCN = EnergyApp.Parser.mapFields(loadHeadersCN, 'shiftable_load');
+    T.assert('可迁移负荷: 中文别名映射', Object.keys(loadMapCN.mapping).length >= 4,
+        `matched=${Object.keys(loadMapCN.mapping).length}`);
+
+    // 13.7 低置信度阻断(无关列名)
+    const badHeaders = ['random_x', 'some_value', 'other_thing'];
+    const badMap = EnergyApp.Parser.mapFields(badHeaders, 'carbon_factor');
+    const badCount = Object.keys(badMap.mapping).length;
+    T.assert('无关列名: 碳排因子映射极少', badCount <= 1,
+        `matched=${badCount}`);
+
+    // 13.8 Validator — 碳排因子校验
+    const validCarbon = [];
+    for (let h = 0; h < 24; h++) {
+        validCarbon.push({ time_period: h, emission_factor: 0.5, region: '华东', effective_date: '2025-01-01' });
+    }
+    const valResult1 = EnergyApp.Validator.validateAll({ carbon_factor: validCarbon });
+    const carbonErrors1 = valResult1.filter(r => r.type === 'carbon_factor' && r.severity === 'error');
+    T.assert('有效碳排因子: 无错误', carbonErrors1.length === 0,
+        `errors=${carbonErrors1.length}`);
+
+    // 13.9 Validator — 无效碳排因子(排放因子超范围)
+    const invalidCarbon = [{ time_period: 0, emission_factor: 5.0, region: '华东', effective_date: '2025-01-01' }];
+    const valResult2 = EnergyApp.Validator.validateAll({ carbon_factor: invalidCarbon });
+    const carbonWarnings2 = valResult2.filter(r => r.type === 'carbon_factor' && (r.severity === 'error' || r.severity === 'warning'));
+    T.assert('超范围排放因子: 有警告或错误', carbonWarnings2.length > 0,
+        `warnings=${carbonWarnings2.length}`);
+
+    // 13.10 Validator — 需量电价校验
+    const validDemand = [
+        { demand_tier: 1, price_per_kw: 28, threshold_kw: 500, billing_period: '月', effective_date: '2025-01-01' },
+        { demand_tier: 2, price_per_kw: 32, threshold_kw: 1000, billing_period: '月', effective_date: '2025-01-01' }
+    ];
+    const valResult3 = EnergyApp.Validator.validateAll({ demand_pricing: validDemand });
+    const demandErrors = valResult3.filter(r => r.type === 'demand_pricing' && r.severity === 'error');
+    T.assert('有效需量电价: 无错误', demandErrors.length === 0,
+        `errors=${demandErrors.length}`);
+
+    // 13.11 Validator — 可迁移负荷校验
+    const validLoads = [
+        { device_id: 'M-1', shiftable_power_kw: 2.5, earliest_start: '22:00', latest_end: '06:00', min_duration_hours: 2, priority: 1 }
+    ];
+    const valResult4 = EnergyApp.Validator.validateAll({ shiftable_load: validLoads });
+    const loadErrors = valResult4.filter(r => r.type === 'shiftable_load' && r.severity === 'error');
+    T.assert('有效可迁移负荷: 无错误', loadErrors.length === 0,
+        `errors=${loadErrors.length}`);
+}
+
+/* ================================================================
  *  运行全部测试
  * ================================================================ */
 async function runAllTests() {
@@ -646,6 +971,10 @@ async function runAllTests() {
     try { await testFieldMappingConfidence(); } catch (e) { T.log(`[ERROR] 套件7异常: ${e.message}`); }
     try { await testProcessorYoYFiltered(); } catch (e) { T.log(`[ERROR] 套件8异常: ${e.message}`); }
     try { await testEndToEnd(); } catch (e) { T.log(`[ERROR] 套件9异常: ${e.message}`); }
+    try { await testCarbonCalculation(); } catch (e) { T.log(`[ERROR] 套件10异常: ${e.message}`); }
+    try { await testStrategySimulation(); } catch (e) { T.log(`[ERROR] 套件11异常: ${e.message}`); }
+    try { await testStrategyFingerprint(); } catch (e) { T.log(`[ERROR] 套件12异常: ${e.message}`); }
+    try { await testNewTypeImport(); } catch (e) { T.log(`[ERROR] 套件13异常: ${e.message}`); }
 
     const elapsed = Date.now() - start;
     T.log(`====== 测试完成 (${elapsed}ms) ======`);

@@ -38,6 +38,9 @@
                             <button class="type-btn" data-type="ac_energy">空调能耗</button>
                             <button class="type-btn" data-type="lighting_energy">照明能耗</button>
                             <button class="type-btn" data-type="pricing">分时电价</button>
+                            <button class="type-btn" data-type="carbon_factor">碳排因子</button>
+                            <button class="type-btn" data-type="demand_pricing">需量电价</button>
+                            <button class="type-btn" data-type="shiftable_load">可迁移负荷</button>
                         </div>
                     </div>
 
@@ -108,6 +111,10 @@
                         <button class="period-btn" data-period="quarter">季</button>
                         <button class="period-btn" data-period="year">年</button>
                     </div>
+                    <div class="filter-group strategy-indicator" id="strategy-indicator" style="display:none">
+                        <span class="strategy-badge">策略激活中</span>
+                        <button id="btn-deactivate-strategy" class="btn-small-danger">关闭</button>
+                    </div>
                 </div>
 
                 <div class="dashboard-grid">
@@ -152,6 +159,41 @@
                     </div>
 
                     <div class="chart-section">
+                        <div class="chart-card full-width" id="carbon-trend-chart">
+                            <h3>碳排放趋势</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card" id="demand-cost-chart">
+                            <h3>需量电费分析</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                        <div class="chart-card" id="load-shift-chart">
+                            <h3>负荷转移效果</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card full-width" id="strategy-panel">
+                            <h3 style="display:flex;justify-content:space-between;align-items:center">
+                                削峰填谷策略沙盘
+                                <span class="strategy-actions">
+                                    <button id="btn-create-strategy" class="btn-small">新建策略</button>
+                                    <button id="btn-compare-strategies" class="btn-small">对比策略</button>
+                                </span>
+                            </h3>
+                            <div class="strategy-selector">
+                                <label>当前策略：</label>
+                                <select id="strategy-select"><option value="">基线（无策略）</option></select>
+                            </div>
+                            <div class="chart-body" id="strategy-comparison-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
                         <div class="chart-card full-width" id="recommendations">
                             <h3>节能建议</h3>
                             <div class="chart-body"></div>
@@ -191,11 +233,13 @@
     <script src="js/validator.js"></script>
     <script src="js/worker-manager.js"></script>
     <script src="js/calculation.js"></script>
+    <script src="js/carbon-strategy.js"></script>
     <script src="js/chart.js"></script>
     <script src="js/filter.js"></script>
     <script src="js/storage.js"></script>
     <script src="js/export.js"></script>
     <script src="js/import-controller.js"></script>
+    <script src="js/strategy-controller.js"></script>
     <script src="js/dashboard-controller.js"></script>
     <script src="js/app.js"></script>
     <script src="js/main.js"></script>

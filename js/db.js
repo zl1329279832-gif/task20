@@ -2,7 +2,7 @@
 window.EnergyApp = window.EnergyApp || {};
 
 EnergyApp.DB = class DB {
-    constructor(dbName = 'EnergyAnalysisDB', version = 1) {
+    constructor(dbName = 'EnergyAnalysisDB', version = 2) {
         this.dbName = dbName;
         this.version = version;
         this.db = null;
@@ -23,7 +23,11 @@ EnergyApp.DB = class DB {
                     { name: 'lighting_energy', keyPath: 'record_id', autoIncrement: true },
                     { name: 'pricing', keyPath: 'pricing_id' },
                     { name: 'schemes', keyPath: 'scheme_id' },
-                    { name: 'preferences', keyPath: 'key' }
+                    { name: 'preferences', keyPath: 'key' },
+                    { name: 'carbon_factors', keyPath: 'factor_id', autoIncrement: true },
+                    { name: 'demand_pricing', keyPath: 'demand_pricing_id', autoIncrement: true },
+                    { name: 'shiftable_loads', keyPath: 'load_id', autoIncrement: true },
+                    { name: 'strategies', keyPath: 'strategy_id' }
                 ];
                 stores.forEach(s => {
                     if (!db.objectStoreNames.contains(s.name)) {
@@ -35,6 +39,12 @@ EnergyApp.DB = class DB {
                         if (s.name === 'devices') store.createIndex('building_id', 'building_id', { unique: false });
                         if (s.name === 'floors') store.createIndex('building_id', 'building_id', { unique: false });
                         if (s.name === 'rooms') store.createIndex('floor_id', 'floor_id', { unique: false });
+                        if (s.name === 'carbon_factors') {
+                            store.createIndex('time_period', 'time_period', { unique: false });
+                            store.createIndex('region', 'region', { unique: false });
+                        }
+                        if (s.name === 'demand_pricing') store.createIndex('billing_period', 'billing_period', { unique: false });
+                        if (s.name === 'shiftable_loads') store.createIndex('device_id', 'device_id', { unique: false });
                     }
                 });
             };
@@ -110,6 +120,6 @@ EnergyApp.DB = class DB {
     }
 
     async clearAllData() {
-        await Promise.all(['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing'].map(s => this.clear(s)));
+        await Promise.all(['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing','carbon_factors','demand_pricing','shiftable_loads'].map(s => this.clear(s)));
     }
 };

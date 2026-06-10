@@ -15,7 +15,11 @@ EnergyApp.DashboardController = class DashboardController {
             yoy: document.getElementById('yoy-chart'),
             mom: document.getElementById('mom-chart'),
             anomalies: document.getElementById('anomaly-alerts'),
-            recommendations: document.getElementById('recommendations')
+            recommendations: document.getElementById('recommendations'),
+            carbonTrend: document.getElementById('carbon-trend-chart'),
+            demandCost: document.getElementById('demand-cost-chart'),
+            loadShift: document.getElementById('load-shift-chart'),
+            strategyPanel: document.getElementById('strategy-panel')
         };
 
         /* ---------- 防串页状态 ---------- */
@@ -41,12 +45,13 @@ EnergyApp.DashboardController = class DashboardController {
 
     async loadData() {
         try {
-            const [buildings, floors, rooms, devices, readings, ac, lighting, pricing] = await Promise.all([
+            const [buildings, floors, rooms, devices, readings, ac, lighting, pricing, carbonFactors, demandPricing, shiftableLoads] = await Promise.all([
                 this.db.getAll('buildings'), this.db.getAll('floors'), this.db.getAll('rooms'),
                 this.db.getAll('devices'), this.db.getAll('meter_readings'), this.db.getAll('ac_energy'),
-                this.db.getAll('lighting_energy'), this.db.getAll('pricing')
+                this.db.getAll('lighting_energy'), this.db.getAll('pricing'),
+                this.db.getAll('carbon_factors'), this.db.getAll('demand_pricing'), this.db.getAll('shiftable_loads')
             ]);
-            this.data = { buildings, floors, rooms, devices, readings, ac, lighting, pricing };
+            this.data = { buildings, floors, rooms, devices, readings, ac, lighting, pricing, carbonFactors, demandPricing, shiftableLoads };
             this.filter.populateBuildings(buildings);
             if (readings.length) {
                 const ts = readings.map(r => new Date(r.timestamp).getTime()).filter(t => !isNaN(t));
@@ -106,12 +111,65 @@ EnergyApp.DashboardController = class DashboardController {
         const recommendations = EnergyApp.Calculation.getRecommendations(readings, pricing, filter);
         EnergyApp.Chart.renderRecommendations(this._c.recommendations, recommendations);
 
+        /* ===== 碳排放 & 需量电费 ===== */
+        const { carbonFactors, demandPricing, shiftableLoads } = this.data;
+        let carbonData = null, demandData = null, shiftableData = null, strategyResult = null;
+
+        if (carbonFactors && carbonFactors.length) {
+            carbonData = EnergyApp.CarbonStrategy.calculateBuildingCarbon(readings, carbonFactors, filter);
+            EnergyApp.Chart.renderCarbonTrend(this._c.carbonTrend, carbonData, carbonFactors);
+        } else if (this._c.carbonTrend) {
+            const cb = this._c.carbonTrend.querySelector('.chart-body');
+            if (cb) cb.innerHTML = '<div class="empty-state"><p>暂无碳排数据（请导入碳排因子）</p></div>';
+        }
+
+        if (demandPricing && demandPricing.length) {
+            demandData = EnergyApp.CarbonStrategy.calculateDemandCost(readings, demandPricing, filter);
+            EnergyApp.Chart.renderDemandCost(this._c.demandCost, demandData);
+        } else if (this._c.demandCost) {
+            const cb = this._c.demandCost.querySelector('.chart-body');
+            if (cb) cb.innerHTML = '<div class="empty-state"><p>暂无需量电费数据（请导入需量电价）</p></div>';
+        }
+
+        if (shiftableLoads && shiftableLoads.length) {
+            shiftableData = EnergyApp.CarbonStrategy.calculateShiftableLoad(readings, shiftableLoads, devices, filter);
+        }
+
+        /* ===== 策略叠加 ===== */
+        if (this._strategyController && this._strategyController.getActiveStrategy()) {
+            strategyResult = this._strategyController.getActiveResult();
+            if (strategyResult) {
+                /* 负荷转移图 */
+                EnergyApp.Chart.renderLoadShift(this._c.loadShift, strategyResult);
+
+                /* 策略对比面板 — 显示当前策略 vs 基线 */
+                const compData = {
+                    baseline: strategyResult.baseline,
+                    strategies: [{
+                        name: this._strategyController.getActiveStrategy().name,
+                        strategy_id: this._strategyController.getActiveStrategy().strategy_id,
+                        delta: strategyResult.delta,
+                        simulated: strategyResult.simulated,
+                        rank: 1
+                    }],
+                    fingerprintConsistent: true
+                };
+                EnergyApp.Chart.renderStrategyComparison(this._c.strategyPanel, compData);
+            }
+        } else {
+            if (this._c.loadShift) {
+                const cb = this._c.loadShift.querySelector('.chart-body');
+                if (cb) cb.innerHTML = '<div class="empty-state"><p>请激活策略查看负荷转移效果</p></div>';
+            }
+        }
+
         /* ===== 缓存完整的计算结果, 供导出报告使用 ===== */
         /* 只有在 queryId 仍然匹配时才缓存(防串页) */
         if (queryId === this._queryId) {
             const overview = EnergyApp.Calculation.getOverview(readings, pricing, filter);
             this._cachedReportData = {
                 overview, trend, ranking, heatmap, yoy, mom, anomalies, recommendations,
+                carbonData, demandData, strategyResult,
                 filter: JSON.parse(JSON.stringify(filter)),
                 generatedAt: new Date().toLocaleString('zh-CN'),
                 _queryId: queryId,
@@ -172,7 +230,10 @@ EnergyApp.DashboardController = class DashboardController {
     /* 强制从当前数据构建报告(兜底) */
     _buildReportData() {
         const filter = this.filter.get();
-        const { readings, pricing, floors, devices } = this.data;
+        const { readings, pricing, floors, devices, carbonFactors, demandPricing, shiftableLoads } = this.data;
+        let carbonData = null, demandData = null;
+        if (carbonFactors && carbonFactors.length) carbonData = EnergyApp.CarbonStrategy.calculateBuildingCarbon(readings, carbonFactors, filter);
+        if (demandPricing && demandPricing.length) demandData = EnergyApp.CarbonStrategy.calculateDemandCost(readings, demandPricing, filter);
         return {
             overview: EnergyApp.Calculation.getOverview(readings, pricing, filter),
             trend: EnergyApp.Calculation.getTimeTrend(readings, pricing, filter),
@@ -182,8 +243,15 @@ EnergyApp.DashboardController = class DashboardController {
             mom: EnergyApp.Calculation.getMoM(readings, filter),
             anomalies: EnergyApp.Calculation.detectAnomalies(readings, filter),
             recommendations: EnergyApp.Calculation.getRecommendations(readings, pricing, filter),
+            carbonData, demandData,
             filter: JSON.parse(JSON.stringify(filter)),
             generatedAt: new Date().toLocaleString('zh-CN')
         };
+    }
+
+    /* 设置策略控制器 */
+    setStrategyController(sc) {
+        this._strategyController = sc;
+        sc.onStrategyChange(() => this.refresh());
     }
 };

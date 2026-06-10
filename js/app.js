@@ -20,6 +20,8 @@ EnergyApp.App = class App {
         this.importController = new EnergyApp.ImportController(this.db, this.workerManager);
         this.importController.onImportComplete = () => this._onImported();
         this.dashboardController = new EnergyApp.DashboardController(this.db, this.filter, this.storage, this.workerManager);
+        this.strategyController = new EnergyApp.StrategyController(this.db, this.filter, this.storage, this.workerManager);
+        this.dashboardController.setStrategyController(this.strategyController);
 
         this._bindNav();
         this._bindActions();
@@ -29,6 +31,9 @@ EnergyApp.App = class App {
         if (readings.length > 0) {
             this._switchView('dashboard');
             await this.dashboardController.init();
+            this.strategyController.setDashboardData(this.dashboardController.data);
+            this.strategyController.init();
+            await this.strategyController.loadStrategies();
         } else {
             await this._loadSampleData();
             this._toast('已加载演示数据，可点击「分析仪表盘」查看', 'info');
@@ -37,7 +42,13 @@ EnergyApp.App = class App {
 
     _bindNav() {
         document.getElementById('btn-import').addEventListener('click', () => this._switchView('import'));
-        document.getElementById('btn-dashboard').addEventListener('click', async () => { this._switchView('dashboard'); await this.dashboardController.init(); });
+        document.getElementById('btn-dashboard').addEventListener('click', async () => {
+            this._switchView('dashboard');
+            await this.dashboardController.init();
+            this.strategyController.setDashboardData(this.dashboardController.data);
+            this.strategyController.init();
+            await this.strategyController.loadStrategies();
+        });
     }
 
     _switchView(view) {
@@ -136,11 +147,16 @@ EnergyApp.App = class App {
         /* 2. 通知看板缓存失效 */
         this.dashboardController.invalidateData();
 
+        /* 3. 通知策略控制器数据变更 */
+        this.strategyController.onDataChanged();
+
         this._toast('数据导入完成', 'info');
         this._switchView('dashboard');
 
-        /* 3. 重新加载数据并渲染 */
+        /* 4. 重新加载数据并渲染 */
         await this.dashboardController.init();
+        this.strategyController.setDashboardData(this.dashboardController.data);
+        await this.strategyController.loadStrategies();
     }
 
     async _loadSampleData() {
@@ -201,12 +217,39 @@ EnergyApp.App = class App {
             }
         });
 
+        /* ---- 碳排因子(24h) ---- */
+        const carbonFactors = [];
+        const hourlyFactors = [0.42,0.40,0.38,0.37,0.36,0.38,0.45,0.55,0.72,0.82,0.88,0.85,0.78,0.75,0.70,0.68,0.72,0.80,0.90,0.92,0.88,0.78,0.60,0.48];
+        for (let h = 0; h < 24; h++) {
+            carbonFactors.push({ time_period: h, emission_factor: hourlyFactors[h], region: '华东电网', effective_date: '2025-01-01' });
+        }
+
+        /* ---- 需量电价(3级阶梯) ---- */
+        const demandPricingData = [
+            { demand_tier: 1, price_per_kw: 28, threshold_kw: 500, billing_period: '月', effective_date: '2025-01-01' },
+            { demand_tier: 2, price_per_kw: 32, threshold_kw: 1000, billing_period: '月', effective_date: '2025-01-01' },
+            { demand_tier: 3, price_per_kw: 38, threshold_kw: 99999, billing_period: '月', effective_date: '2025-01-01' }
+        ];
+
+        /* ---- 可迁移负荷 ---- */
+        const shiftableLoadData = [
+            { device_id: 'M-B001-F1-R1-ac', shiftable_power_kw: 2.5, earliest_start: '22:00', latest_end: '06:00', min_duration_hours: 2, priority: 1 },
+            { device_id: 'M-B001-F2-R1-ac', shiftable_power_kw: 2.5, earliest_start: '22:00', latest_end: '06:00', min_duration_hours: 2, priority: 2 },
+            { device_id: 'M-B002-F1-R1-ac', shiftable_power_kw: 3.0, earliest_start: '23:00', latest_end: '05:00', min_duration_hours: 1, priority: 1 },
+            { device_id: 'M-B003-F1-R1-electricity', shiftable_power_kw: 8.0, earliest_start: '00:00', latest_end: '06:00', min_duration_hours: 3, priority: 1 },
+            { device_id: 'M-B003-F2-R1-electricity', shiftable_power_kw: 8.0, earliest_start: '00:00', latest_end: '06:00', min_duration_hours: 3, priority: 2 },
+            { device_id: 'M-B004-F1-R1-ac', shiftable_power_kw: 1.5, earliest_start: '21:00', latest_end: '07:00', min_duration_hours: 2, priority: 3 }
+        ];
+
         await Promise.all([
             this.db.bulkAdd('buildings', buildings),
             this.db.bulkAdd('floors', floors),
             this.db.bulkAdd('rooms', rooms),
             this.db.bulkAdd('devices', devices),
-            this.db.bulkAdd('pricing', pricing)
+            this.db.bulkAdd('pricing', pricing),
+            this.db.bulkAdd('carbon_factors', carbonFactors),
+            this.db.bulkAdd('demand_pricing', demandPricingData),
+            this.db.bulkAdd('shiftable_loads', shiftableLoadData)
         ]);
         const chunk = 5000;
         for (let i = 0; i < readings.length; i += chunk) await this.db.bulkAdd('meter_readings', readings.slice(i, i + chunk));

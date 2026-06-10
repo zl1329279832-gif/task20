@@ -246,9 +246,44 @@ body {
 .empty-state { text-align: center; padding: 40px 20px; color: var(--gray-400); }
 .empty-state p { font-size: 14px; }
 
+/* ===== 碳排放 & 策略沙盘 ===== */
+.strategy-actions { display: flex; gap: 6px; }
+.btn-small { padding: 5px 14px; font-size: 12px; border: 1px solid var(--gray-300); border-radius: 6px; background: #fff; cursor: pointer; color: var(--gray-700); transition: all var(--transition); }
+.btn-small:hover { background: var(--gray-50); border-color: var(--primary-light); color: var(--primary); }
+.btn-small-danger { padding: 5px 14px; font-size: 12px; border: 1px solid #fca5a5; border-radius: 6px; background: #fef2f2; cursor: pointer; color: #dc2626; transition: all var(--transition); }
+.btn-small-danger:hover { background: #fee2e2; }
+
+.strategy-selector { padding: 4px 18px 12px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--gray-600); }
+.strategy-selector select { padding: 6px 10px; border: 1px solid var(--gray-300); border-radius: 6px; font-size: 13px; min-width: 180px; }
+
+.strategy-badge { background: #dbeafe; color: var(--primary); font-size: 12px; padding: 3px 12px; border-radius: 12px; font-weight: 600; white-space: nowrap; }
+.strategy-indicator { display: flex; align-items: center; gap: 8px; }
+
+.strategy-comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 12px; }
+.comparison-card { background: #fff; border-radius: 10px; padding: 18px; text-align: center; border: 1px solid var(--gray-200); box-shadow: var(--shadow); }
+.comparison-card.baseline { border-top: 3px solid var(--gray-400); }
+.comparison-card.strategy { border-top: 3px solid var(--primary); }
+.comparison-card .card-label { font-size: 13px; font-weight: 700; color: var(--gray-700); margin-bottom: 12px; }
+.comparison-card .metric-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
+.comparison-card .metric-label { color: var(--gray-500); }
+.comparison-card .metric-value { font-weight: 600; color: var(--gray-800); }
+.comparison-card .metric-unit { font-size: 11px; color: var(--gray-400); }
+.comparison-card .metric-delta { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px; }
+.comparison-card .metric-delta.positive { color: #dc2626; background: #fef2f2; }
+.comparison-card .metric-delta.negative { color: #059669; background: #ecfdf5; }
+.comparison-card .carbon-save { color: #059669; }
+.comparison-card .cost-save { color: #059669; }
+
+.fingerprint-warning { background: #fffbeb; border: 1px solid #fbbf24; color: #92400e; padding: 8px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+
+.rule-table { width: 100%; font-size: 13px; border-collapse: collapse; }
+.rule-table th { padding: 6px 8px; background: var(--gray-50); text-align: left; font-weight: 600; border-bottom: 1px solid var(--gray-200); }
+.rule-table td { padding: 4px 8px; border-bottom: 1px solid var(--gray-100); }
+
 @media (max-width: 1024px) {
     .chart-section { grid-template-columns: 1fr; }
     .chart-section.overview-section { grid-template-columns: 1fr; }
+    .strategy-comparison { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 768px) {
     .filter-bar { flex-direction: column; align-items: stretch; }
@@ -257,4 +292,6 @@ body {
     .app-main { padding: 12px; }
     .action-bar { flex-direction: column; }
     .action-bar button { width: 100%; }
+    .strategy-comparison { grid-template-columns: 1fr; }
+    .strategy-actions { flex-wrap: wrap; }
 }

@@ -250,5 +250,285 @@ EnergyApp.Chart = {
             </div>`;
         });
         body.innerHTML = html;
+    },
+
+    /* ===== 碳排放趋势图: 按楼栋堆叠柱 + 碳因子折线 ===== */
+    renderCarbonTrend(container, carbonData, factors) {
+        const body = container.querySelector('.chart-body');
+        if (!carbonData || !carbonData.byPeriod || !carbonData.byPeriod.length) {
+            body.innerHTML = '<div class="empty-state"><p>暂无碳排数据（请导入碳排因子）</p></div>'; return;
+        }
+        const data = carbonData.byPeriod;
+        const canvas = document.createElement('canvas');
+        const pad = { top: 30, right: 60, bottom: 60, left: 70 };
+        canvas.width = body.clientWidth || 700; canvas.height = 320; canvas.style.width = '100%';
+        body.innerHTML = '';
+
+        /* 总量标题 */
+        const header = document.createElement('div');
+        header.style.cssText = 'text-align:center;margin-bottom:8px;font-size:13px;color:#6b7280';
+        const totalT = carbonData.totalCarbon >= 1000 ? (carbonData.totalCarbon/1000).toFixed(2)+' tCO₂' : carbonData.totalCarbon.toFixed(1)+' kgCO₂';
+        header.textContent = `总碳排放: ${totalT}`;
+        body.appendChild(header);
+        body.appendChild(canvas);
+
+        const ctx = canvas.getContext('2d');
+        const cw = canvas.width, ch = canvas.height;
+        const chartW = cw - pad.left - pad.right, chartH = ch - pad.top - pad.bottom;
+        const maxC = Math.max(...data.map(d => d.carbon), 1);
+
+        /* 网格线 */
+        ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 0.5;
+        for (let i = 0; i <= 5; i++) {
+            const y = pad.top + (chartH * i / 5);
+            ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(cw - pad.right, y); ctx.stroke();
+            ctx.fillStyle = '#9ca3af'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+            ctx.fillText(EnergyApp.utils.formatNumber(maxC * (5 - i) / 5, 0), pad.left - 8, y + 4);
+        }
+
+        /* 柱状图 */
+        const barW = Math.min((chartW / data.length) * 0.6, 40);
+        const barGap = chartW / data.length;
+        const carbonColors = ['#166534','#15803d','#22c55e','#86efac'];
+        data.forEach((d, i) => {
+            const x = pad.left + i * barGap + (barGap - barW) / 2;
+            const h = (d.carbon / maxC) * chartH;
+            const grad = ctx.createLinearGradient(x, pad.top + chartH - h, x, pad.top + chartH);
+            grad.addColorStop(0, carbonColors[0]); grad.addColorStop(1, carbonColors[2]);
+            ctx.fillStyle = grad;
+            ctx.fillRect(x, pad.top + chartH - h, barW, h);
+
+            ctx.save();
+            ctx.translate(x + barW / 2, ch - pad.bottom + 12);
+            ctx.rotate(-0.4);
+            ctx.fillStyle = '#6b7280'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+            ctx.fillText(d.period || '', 0, 0);
+            ctx.restore();
+        });
+
+        /* 碳因子折线 (右轴) */
+        if (carbonData.byHour && carbonData.byHour.length) {
+            const hourData = carbonData.byHour.filter(h => h.count > 0);
+            if (hourData.length > 1) {
+                const maxF = Math.max(...hourData.map(h => h.factor), 0.1);
+                ctx.strokeStyle = '#92400e'; ctx.lineWidth = 2; ctx.setLineDash([4, 3]); ctx.beginPath();
+                hourData.forEach((h, i) => {
+                    const x = pad.left + (i / (hourData.length - 1)) * chartW;
+                    const y = pad.top + chartH - (h.factor / maxF) * chartH;
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                });
+                ctx.stroke(); ctx.setLineDash([]);
+                /* 右轴标签 */
+                ctx.fillStyle = '#92400e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+                ctx.fillText(maxF.toFixed(2), cw - pad.right + 4, pad.top + 4);
+                ctx.fillText('0', cw - pad.right + 4, pad.top + chartH + 4);
+                ctx.fillText('kgCO₂/kWh', cw - pad.right + 4, pad.top - 10);
+            }
+        }
+
+        /* 图例 */
+        ctx.fillStyle = carbonColors[1]; ctx.fillRect(pad.left, 6, 12, 12);
+        ctx.fillStyle = '#374151'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText('碳排放', pad.left + 16, 16);
+        ctx.strokeStyle = '#92400e'; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(pad.left + 80, 12); ctx.lineTo(pad.left + 100, 12); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = '#92400e'; ctx.fillText('碳因子', pad.left + 104, 16);
+    },
+
+    /* ===== 需量电费分析图: 柱状图按阶梯分色 ===== */
+    renderDemandCost(container, demandData) {
+        const body = container.querySelector('.chart-body');
+        if (!demandData || !demandData.byPeriod || !demandData.byPeriod.length) {
+            body.innerHTML = '<div class="empty-state"><p>暂无需量电费数据（请导入需量电价）</p></div>'; return;
+        }
+        const data = demandData.byPeriod;
+        const canvas = document.createElement('canvas');
+        const pad = { top: 30, right: 30, bottom: 60, left: 70 };
+        canvas.width = body.clientWidth || 500; canvas.height = 280; canvas.style.width = '100%';
+        body.innerHTML = '';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'text-align:center;margin-bottom:8px;font-size:13px;color:#6b7280';
+        header.textContent = `总需量电费: ¥${demandData.totalDemandCost.toFixed(2)}`;
+        body.appendChild(header);
+        body.appendChild(canvas);
+
+        const ctx = canvas.getContext('2d');
+        const cw = canvas.width, ch = canvas.height;
+        const chartW = cw - pad.left - pad.right, chartH = ch - pad.top - pad.bottom;
+        const maxCost = Math.max(...data.map(d => d.cost), 1);
+        const tierColors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f43f5e'];
+
+        ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 0.5;
+        for (let i = 0; i <= 4; i++) {
+            const y = pad.top + (chartH * i / 4);
+            ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(cw - pad.right, y); ctx.stroke();
+            ctx.fillStyle = '#9ca3af'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+            ctx.fillText('¥' + EnergyApp.utils.formatNumber(maxCost * (4 - i) / 4, 0), pad.left - 8, y + 4);
+        }
+
+        const barW = Math.min((chartW / data.length) * 0.6, 44);
+        const barGap = chartW / data.length;
+
+        data.forEach((d, i) => {
+            const x = pad.left + i * barGap + (barGap - barW) / 2;
+            let cumH = 0;
+            (d.tierBreakdown || []).forEach((t, ti) => {
+                const h = (t.cost / maxCost) * chartH;
+                ctx.fillStyle = tierColors[ti % tierColors.length];
+                ctx.fillRect(x, pad.top + chartH - cumH - h, barW, h);
+                cumH += h;
+            });
+
+            /* 峰值需量标注 */
+            ctx.fillStyle = '#374151'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(`${d.peakDemand.toFixed(0)}kW`, x + barW / 2, pad.top + chartH - cumH - 4);
+
+            ctx.save();
+            ctx.translate(x + barW / 2, ch - pad.bottom + 12);
+            ctx.rotate(-0.4);
+            ctx.fillStyle = '#6b7280'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+            ctx.fillText(d.period, 0, 0);
+            ctx.restore();
+        });
+    },
+
+    /* ===== 策略对比面板: HTML卡片网格 ===== */
+    renderStrategyComparison(container, compData) {
+        const body = container.querySelector('.chart-body') || container;
+        if (!compData || (!compData.strategies || !compData.strategies.length)) {
+            body.innerHTML = '<div class="empty-state"><p>请新建并激活策略进行对比</p></div>'; return;
+        }
+
+        const fmt = (v, d) => v == null || isNaN(v) ? '-' : Number(v).toFixed(d);
+        const fmtPct = v => v == null || isNaN(v) ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(1) + '%';
+        let html = '';
+
+        if (!compData.fingerprintConsistent) {
+            html += '<div class="fingerprint-warning">&#9888; 策略计算时数据不一致，对比结果仅供参考</div>';
+        }
+
+        html += '<div class="strategy-comparison">';
+
+        /* 基线卡片 */
+        if (compData.baseline) {
+            html += `<div class="comparison-card baseline">
+                <div class="card-label">基线</div>
+                <div class="metric-row"><span class="metric-label">碳排放</span><span class="metric-value">${fmt(compData.baseline.carbon, 1)}</span><span class="metric-unit">kgCO₂</span></div>
+                <div class="metric-row"><span class="metric-label">需量电费</span><span class="metric-value">¥${fmt(compData.baseline.demandCost, 2)}</span></div>
+                <div class="metric-row"><span class="metric-label">总能耗</span><span class="metric-value">${fmt(compData.baseline.totalEnergy, 0)}</span><span class="metric-unit">kWh</span></div>
+            </div>`;
+        }
+
+        /* 各策略卡片 */
+        compData.strategies.forEach(s => {
+            const cRedu = s.delta?.carbonReductionPct || 0;
+            const dRedu = s.delta?.costReductionPct || 0;
+            html += `<div class="comparison-card strategy">
+                <div class="card-label">#${s.rank} ${s.name}</div>
+                <div class="metric-row"><span class="metric-label">碳排放</span><span class="metric-value">${fmt(s.simulated?.carbon, 1)}</span><span class="metric-delta ${cRedu > 0 ? 'negative' : 'positive'}">${fmtPct(-cRedu)}</span></div>
+                <div class="metric-row"><span class="metric-label">需量电费</span><span class="metric-value">¥${fmt(s.simulated?.demandCost, 2)}</span><span class="metric-delta ${dRedu > 0 ? 'negative' : 'positive'}">${fmtPct(-dRedu)}</span></div>
+                <div class="metric-row"><span class="metric-label">碳减排</span><span class="metric-value carbon-save">${fmt(s.delta?.carbonReduction, 1)} kgCO₂</span></div>
+                <div class="metric-row"><span class="metric-label">费用节省</span><span class="metric-value cost-save">¥${fmt(s.delta?.costReduction, 2)}</span></div>
+            </div>`;
+        });
+        html += '</div>';
+        body.innerHTML = html;
+    },
+
+    /* ===== 负荷转移效果图: 24h双曲线 ===== */
+    renderLoadShift(container, shiftData) {
+        const body = container.querySelector('.chart-body');
+        if (!shiftData || !shiftData.loadProfile) {
+            body.innerHTML = '<div class="empty-state"><p>暂无负荷转移数据</p></div>'; return;
+        }
+        const { original, shifted } = shiftData.loadProfile;
+        const canvas = document.createElement('canvas');
+        const pad = { top: 30, right: 30, bottom: 40, left: 60 };
+        canvas.width = body.clientWidth || 500; canvas.height = 260; canvas.style.width = '100%';
+        body.innerHTML = '';
+        body.appendChild(canvas);
+
+        const ctx = canvas.getContext('2d');
+        const cw = canvas.width, ch = canvas.height;
+        const chartW = cw - pad.left - pad.right, chartH = ch - pad.top - pad.bottom;
+        const allVals = [...original, ...shifted];
+        const maxV = Math.max(...allVals, 1);
+
+        /* 网格 */
+        ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 0.5;
+        for (let i = 0; i <= 4; i++) {
+            const y = pad.top + (chartH * i / 4);
+            ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(cw - pad.right, y); ctx.stroke();
+            ctx.fillStyle = '#9ca3af'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+            ctx.fillText(EnergyApp.utils.formatNumber(maxV * (4 - i) / 4, 1), pad.left - 8, y + 4);
+        }
+
+        /* X轴 */
+        for (let h = 0; h < 24; h += 3) {
+            const x = pad.left + (h / 23) * chartW;
+            ctx.fillStyle = '#9ca3af'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(h + ':00', x, ch - pad.bottom + 16);
+        }
+
+        const getXY = (arr, idx) => ({
+            x: pad.left + (idx / 23) * chartW,
+            y: pad.top + chartH - (arr[idx] / maxV) * chartH
+        });
+
+        /* 填充削峰区域(原始 > 转移后) */
+        ctx.beginPath();
+        for (let h = 0; h < 24; h++) {
+            const p1 = getXY(original, h);
+            if (h === 0) ctx.moveTo(p1.x, p1.y); else ctx.lineTo(p1.x, p1.y);
+        }
+        for (let h = 23; h >= 0; h--) {
+            const p2 = getXY(shifted, h);
+            ctx.lineTo(p2.x, p2.y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(239,68,68,0.12)';
+        ctx.fill();
+
+        /* 填充填谷区域(转移后 > 原始) */
+        ctx.beginPath();
+        for (let h = 0; h < 24; h++) {
+            const p2 = getXY(shifted, h);
+            if (h === 0) ctx.moveTo(p2.x, p2.y); else ctx.lineTo(p2.x, p2.y);
+        }
+        for (let h = 23; h >= 0; h--) {
+            const p1 = getXY(original, h);
+            ctx.lineTo(p1.x, p1.y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(16,185,129,0.12)';
+        ctx.fill();
+
+        /* 原始曲线 */
+        ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2; ctx.setLineDash([]); ctx.beginPath();
+        for (let h = 0; h < 24; h++) {
+            const p = getXY(original, h);
+            if (h === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+
+        /* 转移后曲线 (虚线) */
+        ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2; ctx.setLineDash([6, 3]); ctx.beginPath();
+        for (let h = 0; h < 24; h++) {
+            const p = getXY(shifted, h);
+            if (h === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke(); ctx.setLineDash([]);
+
+        /* 图例 */
+        const lx = pad.left;
+        ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(lx, 10); ctx.lineTo(lx + 20, 10); ctx.stroke();
+        ctx.fillStyle = '#374151'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left'; ctx.fillText('原始负荷', lx + 24, 14);
+        ctx.strokeStyle = '#10b981'; ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(lx + 100, 10); ctx.lineTo(lx + 120, 10); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillText('转移后', lx + 124, 14);
+        ctx.fillStyle = 'rgba(239,68,68,0.3)'; ctx.fillRect(lx + 180, 4, 12, 12);
+        ctx.fillStyle = '#374151'; ctx.fillText('削峰', lx + 196, 14);
+        ctx.fillStyle = 'rgba(16,185,129,0.3)'; ctx.fillRect(lx + 230, 4, 12, 12);
+        ctx.fillStyle = '#374151'; ctx.fillText('填谷', lx + 246, 14);
     }
 };

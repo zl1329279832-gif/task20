@@ -7,7 +7,7 @@ EnergyApp.Storage = class Storage {
 
     /* ---- 生成数据指纹: 各 store 的记录数 + 采样哈希 ---- */
     async computeDataFingerprint() {
-        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing'];
+        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing','carbon_factors','demand_pricing','migratable_loads'];
         const fp = {};
         for (const store of stores) {
             try {
@@ -32,7 +32,7 @@ EnergyApp.Storage = class Storage {
     /* ---- 指纹比对 ---- */
     compareFingerprint(savedFp, currentFp) {
         if (!savedFp || !currentFp) return { match: false, reason: '缺少指纹数据' };
-        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing'];
+        const stores = ['buildings','floors','rooms','devices','meter_readings','ac_energy','lighting_energy','pricing','carbon_factors','demand_pricing','migratable_loads'];
         for (const store of stores) {
             const s = savedFp[store] || { count: 0 };
             const c = currentFp[store] || { count: 0 };

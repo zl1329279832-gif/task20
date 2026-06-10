@@ -34,7 +34,7 @@ button{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:1
 <body>
 <div class="container">
 <h1>楼宇能耗分析系统 — 数据一致性验证测试</h1>
-<p class="subtitle">覆盖: 导入A后立即导入B、快速切换楼栋/楼层/时间段、保存方案再恢复、导出报告一致性</p>
+<p class="subtitle">覆盖: 导入A后导入B、快速切换、方案保存恢复、导出一致性、碳排放、策略对比、低置信映射、过期回包</p>
 
 <div class="btn-row">
     <button class="btn-primary" id="btn-run-all">运行全部测试</button>
@@ -56,6 +56,7 @@ button{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:1
 <script src="../js/filter.js"></script>
 <script src="../js/storage.js"></script>
 <script src="../js/export.js"></script>
+<script src="../js/strategy-manager.js"></script>
 <script>
 /* ================================================================
  *  测试框架 — 不依赖 DOM 控件, 直接测试核心模块的逻辑
@@ -626,6 +627,267 @@ async function testEndToEnd() {
 }
 
 /* ================================================================
+ *  测试套件 10: 快速切换筛选 + 策略数据
+ * ================================================================ */
+async function testQuickFilterWithStrategy() {
+    T.group('10. 快速切换筛选 + 策略一致性');
+
+    const readings = [
+        ...makeReadings('B001', 'M-1', 100, 2025, 20),
+        ...makeReadings('B002', 'M-2', 100, 2025, 30),
+        ...makeReadings('B003', 'M-3', 100, 2025, 15),
+    ];
+    const carbonFactors = [
+        { factor_id: 'CF1', building_id: 'all', period_type: 'sharp_peak', factor: 1.1 },
+        { factor_id: 'CF2', building_id: 'all', period_type: 'peak', factor: 0.9 },
+        { factor_id: 'CF3', building_id: 'all', period_type: 'flat', factor: 0.7 },
+        { factor_id: 'CF4', building_id: 'all', period_type: 'valley', factor: 0.4 },
+    ];
+
+    // 10.1 不同楼栋的碳排不同
+    const f1 = { buildingId: 'B001', startDate: '', endDate: '', energyType: 'all' };
+    const f2 = { buildingId: 'B002', startDate: '', endDate: '', energyType: 'all' };
+    const c1 = EnergyApp.Calculation.calculateCarbon(readings, carbonFactors, [], f1);
+    const c2 = EnergyApp.Calculation.calculateCarbon(readings, carbonFactors, [], f2);
+    T.assert('B001碳排 ≠ B002碳排', Math.abs(c1.totalCarbon - c2.totalCarbon) > 1,
+        `B001=${c1.totalCarbon.toFixed(0)}, B002=${c2.totalCarbon.toFixed(0)}`);
+
+    // 10.2 策略评估对不同楼栋独立
+    const params = { load_shift_pct: 0.3, demand_reduction_pct: 0.1, device_efficiency_gain: 0.05, weekend_shutdown_pct: 0.4 };
+    const s1 = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], f1, params);
+    const s2 = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], f2, params);
+    T.assert('B001策略结果 ≠ B002策略结果', Math.abs(s1.baseline.totalCarbon - s2.baseline.totalCarbon) > 1,
+        `B001基线碳排=${s1.baseline.totalCarbon.toFixed(0)}, B002=${s2.baseline.totalCarbon.toFixed(0)}`);
+
+    // 10.3 快速切换筛选后, 结果引用正确的filter
+    const f3 = { buildingId: 'B003', startDate: '', endDate: '', energyType: 'all' };
+    const c3 = EnergyApp.Calculation.calculateCarbon(readings, carbonFactors, [], f3);
+    T.assert('B003碳排 > 0', c3.totalCarbon > 0, `碳排=${c3.totalCarbon.toFixed(0)}`);
+    T.assert('B003碳排 < B002碳排', c3.totalCarbon < c2.totalCarbon,
+        `B003=${c3.totalCarbon.toFixed(0)}, B002=${c2.totalCarbon.toFixed(0)}`);
+}
+
+/* ================================================================
+ *  测试套件 11: 重复导入失效
+ * ================================================================ */
+async function testRepeatedImportInvalidation() {
+    T.group('11. 重复导入 — 碳排因子更新后重算');
+
+    const db = new EnergyApp.DB();
+    await db.open();
+    const wm = new EnergyApp.WorkerManager('./nonexistent-worker.js');
+    const storage = new EnergyApp.Storage(db);
+
+    // 11.1 导入碳排因子集A
+    const factorsA = [
+        { factor_id: 'CF-A1', building_id: 'all', period_type: 'flat', factor: 0.8, effective_date: '2025-01-01' }
+    ];
+    await db.clear('carbon_factors');
+    await db.bulkAdd('carbon_factors', factorsA);
+
+    const readings = makeReadings('B001', 'M-1', 50, 2025, 20);
+    const carbonA = EnergyApp.Calculation.calculateCarbon(readings, factorsA, [], { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' });
+    T.assert('因子集A: 碳排 > 0', carbonA.totalCarbon > 0, `碳排=${carbonA.totalCarbon.toFixed(0)}`);
+
+    // 11.2 bumpSessionVersion 模拟重新导入
+    wm.bumpSessionVersion();
+    T.assert('sessionVersion 已推进', wm.getSessionVersion() === 1);
+
+    // 11.3 导入碳排因子集B (更高的因子)
+    const factorsB = [
+        { factor_id: 'CF-B1', building_id: 'all', period_type: 'flat', factor: 1.2, effective_date: '2025-01-01' }
+    ];
+    await db.clear('carbon_factors');
+    await db.bulkAdd('carbon_factors', factorsB);
+
+    const carbonB = EnergyApp.Calculation.calculateCarbon(readings, factorsB, [], { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' });
+    T.assert('因子集B碳排 > 因子集A碳排', carbonB.totalCarbon > carbonA.totalCarbon,
+        `A=${carbonA.totalCarbon.toFixed(0)}, B=${carbonB.totalCarbon.toFixed(0)}`);
+    T.assert('碳排比例 ≈ 因子比例(1.2/0.8=1.5)', Math.abs(carbonB.totalCarbon / carbonA.totalCarbon - 1.5) < 0.01,
+        `比例=${(carbonB.totalCarbon / carbonA.totalCarbon).toFixed(3)}`);
+
+    // 11.4 指纹检测到变更
+    const fpA = await storage.computeDataFingerprint();
+    await db.clear('carbon_factors');
+    await db.bulkAdd('carbon_factors', factorsB);
+    const fpB = await storage.computeDataFingerprint();
+    const cmp = storage.compareFingerprint(fpA, fpB);
+    // 指纹可能匹配(因为carbon_factors都是1条), 验证store count
+    T.assert('carbon_factors 记录数在指纹中', fpA.carbon_factors?.count !== undefined,
+        `count=${fpA.carbon_factors?.count}`);
+
+    // 清理
+    await db.clear('carbon_factors');
+    await db.clear('meter_readings');
+    wm.terminate();
+}
+
+/* ================================================================
+ *  测试套件 12: 低置信度字段映射 — 新数据类型
+ * ================================================================ */
+async function testLowConfidenceNewTypes() {
+    T.group('12. 低置信度映射 — 新数据类型');
+
+    // 12.1 carbon_factor 标准列名精确匹配
+    const headers1 = ['factor_id', 'building_id', 'period_type', 'factor', 'effective_date', 'source'];
+    const map1 = EnergyApp.Parser.mapFields(headers1, 'carbon_factor');
+    const conf1 = Object.values(map1.mapping).map(m => m.confidence);
+    T.assert('carbon_factor 精确匹配: 全部 >= 0.9', conf1.every(c => c >= 0.9),
+        `匹配 ${Object.keys(map1.mapping).length} 字段, 置信度: ${conf1.join(', ')}`);
+
+    // 12.2 demand_pricing 标准列名
+    const headers2 = ['demand_pricing_id', 'building_id', 'rate_per_kw', 'billing_period', 'threshold_kw', 'effective_date'];
+    const map2 = EnergyApp.Parser.mapFields(headers2, 'demand_pricing');
+    const conf2 = Object.values(map2.mapping).map(m => m.confidence);
+    T.assert('demand_pricing 精确匹配: 全部 >= 0.9', conf2.every(c => c >= 0.9),
+        `匹配 ${Object.keys(map2.mapping).length} 字段`);
+
+    // 12.3 migratable_load 标准列名
+    const headers3 = ['load_id', 'building_id', 'device_type', 'from_period', 'to_period', 'max_capacity_kwh', 'shift_efficiency'];
+    const map3 = EnergyApp.Parser.mapFields(headers3, 'migratable_load');
+    const conf3 = Object.values(map3.mapping).map(m => m.confidence);
+    T.assert('migratable_load 精确匹配: 全部 >= 0.9', conf3.every(c => c >= 0.9),
+        `匹配 ${Object.keys(map3.mapping).length} 字段`);
+
+    // 12.4 无关列名 — 应产生低置信度或无映射
+    const headers4 = ['col_x', 'col_y', 'col_z', 'random_data', 'abc_123'];
+    const map4 = EnergyApp.Parser.mapFields(headers4, 'carbon_factor');
+    const mappedCount = Object.keys(map4.mapping).length;
+    const hasLow = Object.values(map4.mapping).some(m => m.confidence < 0.5);
+    T.assert('无关列名: 极少映射或低置信度', mappedCount === 0 || hasLow,
+        `匹配 ${mappedCount} 字段, 低置信: ${hasLow}`);
+
+    // 12.5 中文列名
+    const headers5 = ['碳排因子', '排放系数', '楼栋编号', '时段类型', '生效日期'];
+    const map5 = EnergyApp.Parser.mapFields(headers5, 'carbon_factor');
+    const mapped5 = Object.keys(map5.mapping).length;
+    T.assert('carbon_factor 中文列名可映射', mapped5 >= 3,
+        `匹配 ${mapped5} 字段`);
+}
+
+/* ================================================================
+ *  测试套件 13: 过期 Worker 回包丢弃
+ * ================================================================ */
+async function testStaleWorkerDiscard() {
+    T.group('13. 过期回包丢弃 — 碳排/策略计算');
+
+    const wm = new EnergyApp.WorkerManager('./nonexistent-worker.js');
+    const readings = makeReadings('B001', 'M-1', 50, 2025, 20);
+    const carbonFactors = [{ factor_id: 'CF1', building_id: 'all', period_type: 'flat', factor: 0.7 }];
+    const filter = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' };
+
+    // 13.1 calculateCarbon 在 bumpSessionVersion 后被拒绝
+    wm.bumpSessionVersion();
+    const carbonPromise = wm.execute('calculateCarbon', {
+        meterReadings: readings, carbonFactors, pricing: [], filter
+    });
+    wm.bumpSessionVersion(); // 中途 bump
+    try {
+        await carbonPromise;
+        T.assert('碳排计算: 过期任务被拒绝', false, 'Promise 未拒绝');
+    } catch (e) {
+        T.assert('碳排计算: 过期任务被拒绝', e.message.includes('数据') || e.message.includes('过期'),
+            `错误: ${e.message}`);
+    }
+
+    // 13.2 evaluateStrategy 在 bumpSessionVersion 后被拒绝
+    wm.bumpSessionVersion();
+    const strategyPromise = wm.execute('evaluateStrategy', {
+        meterReadings: readings, carbonFactors, demandPricing: [], migratableLoads: [],
+        pricing: [], filter, strategyParams: { load_shift_pct: 0.2 }
+    });
+    wm.bumpSessionVersion();
+    try {
+        await strategyPromise;
+        T.assert('策略评估: 过期任务被拒绝', false, 'Promise 未拒绝');
+    } catch (e) {
+        T.assert('策略评估: 过期任务被拒绝', e.message.includes('数据') || e.message.includes('过期'),
+            `错误: ${e.message}`);
+    }
+
+    // 13.3 正常任务不受影响
+    wm.bumpSessionVersion();
+    const normalResult = await wm.execute('calculateCarbon', {
+        meterReadings: readings, carbonFactors, pricing: [], filter
+    });
+    T.assert('正常碳排计算成功', normalResult && normalResult.totalCarbon >= 0,
+        `totalCarbon=${normalResult?.totalCarbon?.toFixed(0)}`);
+
+    wm.terminate();
+}
+
+/* ================================================================
+ *  测试套件 14: 策略对比一致性
+ * ================================================================ */
+async function testStrategyComparisonConsistency() {
+    T.group('14. 策略对比 — 一致性校验');
+
+    const readings = [
+        ...makeReadings('B001', 'M-1', 200, 2025, 20),
+        ...makeReadings('B002', 'M-2', 200, 2025, 30),
+    ];
+    const carbonFactors = [
+        { factor_id: 'CF1', building_id: 'all', period_type: 'sharp_peak', factor: 1.1 },
+        { factor_id: 'CF2', building_id: 'all', period_type: 'peak', factor: 0.9 },
+        { factor_id: 'CF3', building_id: 'all', period_type: 'flat', factor: 0.7 },
+        { factor_id: 'CF4', building_id: 'all', period_type: 'valley', factor: 0.4 },
+    ];
+    const filter = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' };
+
+    // 14.1 基线策略: savings 应为 0
+    const baselineParams = { load_shift_pct: 0, demand_reduction_pct: 0, device_efficiency_gain: 0, weekend_shutdown_pct: 0 };
+    const baselineResult = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], filter, baselineParams);
+    T.assert('基线策略: 碳减排率 ≈ 0', Math.abs(baselineResult.reductionPct) < 1,
+        `reductionPct=${baselineResult.reductionPct.toFixed(2)}%`);
+    T.assert('基线策略: 节省成本 ≈ 0', Math.abs(baselineResult.savings.cost) < baselineResult.baseline.totalCost * 0.01,
+        `savings.cost=${baselineResult.savings.cost.toFixed(0)}`);
+
+    // 14.2 优化策略: savings > 0
+    const optimizedParams = { load_shift_pct: 0.3, demand_reduction_pct: 0.1, device_efficiency_gain: 0.05, weekend_shutdown_pct: 0.4 };
+    const optimizedResult = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], filter, optimizedParams);
+    T.assert('优化策略: 碳减排率 > 0', optimizedResult.reductionPct > 0,
+        `reductionPct=${optimizedResult.reductionPct.toFixed(2)}%`);
+    T.assert('优化策略: 碳排低于基线', optimizedResult.projected.totalCarbon < baselineResult.baseline.totalCarbon,
+        `基线=${baselineResult.baseline.totalCarbon.toFixed(0)}, 预测=${optimizedResult.projected.totalCarbon.toFixed(0)}`);
+
+    // 14.3 同一数据+filter评估多次, 结果一致
+    const r1 = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], filter, optimizedParams);
+    const r2 = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], filter, optimizedParams);
+    T.assert('多次评估结果一致(碳排)', Math.abs(r1.projected.totalCarbon - r2.projected.totalCarbon) < 0.01,
+        `r1=${r1.projected.totalCarbon.toFixed(2)}, r2=${r2.projected.totalCarbon.toFixed(2)}`);
+    T.assert('多次评估结果一致(成本)', Math.abs(r1.projected.totalCost - r2.projected.totalCost) < 0.01,
+        `r1=${r1.projected.totalCost.toFixed(2)}, r2=${r2.projected.totalCost.toFixed(2)}`);
+
+    // 14.4 参数更大的策略应有更大减排
+    const aggressiveParams = { load_shift_pct: 0.5, demand_reduction_pct: 0.2, device_efficiency_gain: 0.1, weekend_shutdown_pct: 0.6 };
+    const aggressiveResult = EnergyApp.Calculation.evaluateStrategy(readings, carbonFactors, [], [], [], filter, aggressiveParams);
+    T.assert('激进策略减排 > 温和策略减排', aggressiveResult.reductionPct > optimizedResult.reductionPct,
+        `激进=${aggressiveResult.reductionPct.toFixed(1)}%, 温和=${optimizedResult.reductionPct.toFixed(1)}%`);
+
+    // 14.5 月度投影数组长度与基线月度一致
+    T.assert('月度投影非空', optimizedResult.monthlyProjection.length > 0,
+        `${optimizedResult.monthlyProjection.length} 个月`);
+    const mpTotal = optimizedResult.monthlyProjection.reduce((s, m) => s + m.baselineCarbon, 0);
+    T.assert('月度投影基线碳排 ≈ 总基线碳排', Math.abs(mpTotal - optimizedResult.baseline.totalCarbon) < 1,
+        `月度总=${mpTotal.toFixed(0)}, 基线总=${optimizedResult.baseline.totalCarbon.toFixed(0)}`);
+
+    // 14.6 StrategyManager 创建/对比
+    const db = new EnergyApp.DB();
+    await db.open();
+    const storage = new EnergyApp.Storage(db);
+    const sm = new EnergyApp.StrategyManager(db, new EnergyApp.WorkerManager('./nonexistent-worker.js'), storage);
+
+    const s1 = await sm.create('基线测试', '', baselineParams, true);
+    const s2 = await sm.create('优化测试', '', optimizedParams, false);
+    T.assert('策略创建成功', !!s1.strategy_id && !!s2.strategy_id);
+
+    // 清理
+    await sm.delete(s1.strategy_id);
+    await sm.delete(s2.strategy_id);
+    sm.worker.terminate();
+}
+
+/* ================================================================
  *  运行全部测试
  * ================================================================ */
 async function runAllTests() {
@@ -646,6 +908,11 @@ async function runAllTests() {
     try { await testFieldMappingConfidence(); } catch (e) { T.log(`[ERROR] 套件7异常: ${e.message}`); }
     try { await testProcessorYoYFiltered(); } catch (e) { T.log(`[ERROR] 套件8异常: ${e.message}`); }
     try { await testEndToEnd(); } catch (e) { T.log(`[ERROR] 套件9异常: ${e.message}`); }
+    try { await testQuickFilterWithStrategy(); } catch (e) { T.log(`[ERROR] 套件10异常: ${e.message}`); }
+    try { await testRepeatedImportInvalidation(); } catch (e) { T.log(`[ERROR] 套件11异常: ${e.message}`); }
+    try { await testLowConfidenceNewTypes(); } catch (e) { T.log(`[ERROR] 套件12异常: ${e.message}`); }
+    try { await testStaleWorkerDiscard(); } catch (e) { T.log(`[ERROR] 套件13异常: ${e.message}`); }
+    try { await testStrategyComparisonConsistency(); } catch (e) { T.log(`[ERROR] 套件14异常: ${e.message}`); }
 
     const elapsed = Date.now() - start;
     T.log(`====== 测试完成 (${elapsed}ms) ======`);

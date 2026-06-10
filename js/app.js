@@ -10,6 +10,7 @@ EnergyApp.App = class App {
         this.workerManager = null;
         this.importController = null;
         this.dashboardController = null;
+        this.strategyManager = null;
         this.currentView = 'import';
     }
 
@@ -17,12 +18,15 @@ EnergyApp.App = class App {
         await this.db.open();
         this.storage = new EnergyApp.Storage(this.db);
         this.workerManager = new EnergyApp.WorkerManager('./workers/processor.js');
+        this.strategyManager = new EnergyApp.StrategyManager(this.db, this.workerManager, this.storage);
         this.importController = new EnergyApp.ImportController(this.db, this.workerManager);
         this.importController.onImportComplete = () => this._onImported();
         this.dashboardController = new EnergyApp.DashboardController(this.db, this.filter, this.storage, this.workerManager);
+        this.dashboardController.strategyManager = this.strategyManager;
 
         this._bindNav();
         this._bindActions();
+        this._bindStrategyUI();
         this.filter.bindUI();
 
         const readings = await this.db.getAll('meter_readings');
@@ -38,14 +42,17 @@ EnergyApp.App = class App {
     _bindNav() {
         document.getElementById('btn-import').addEventListener('click', () => this._switchView('import'));
         document.getElementById('btn-dashboard').addEventListener('click', async () => { this._switchView('dashboard'); await this.dashboardController.init(); });
+        document.getElementById('btn-strategy').addEventListener('click', async () => { this._switchView('strategy'); await this.strategyManager.loadAll(); });
     }
 
     _switchView(view) {
         this.currentView = view;
         document.getElementById('import-section').classList.toggle('active', view === 'import');
         document.getElementById('dashboard-section').classList.toggle('active', view === 'dashboard');
+        document.getElementById('strategy-section').classList.toggle('active', view === 'strategy');
         document.getElementById('btn-import').classList.toggle('active', view === 'import');
         document.getElementById('btn-dashboard').classList.toggle('active', view === 'dashboard');
+        document.getElementById('btn-strategy').classList.toggle('active', view === 'strategy');
     }
 
     _bindActions() {
@@ -126,6 +133,192 @@ EnergyApp.App = class App {
             EnergyApp.Export.download(html);
             this._toast('报告已导出', 'success');
         } catch (err) { this._toast('导出失败: ' + err.message, 'error'); }
+    }
+
+    _exportStrategyReport() {
+        try {
+            const comparison = this.strategyManager.getComparisonData();
+            if (!comparison.length) {
+                this._toast('请先创建并评估策略，选择至少一个策略进行对比', 'warning');
+                return;
+            }
+            const html = EnergyApp.Export.generateStrategyReport(comparison);
+            EnergyApp.Export.download(html, `策略对比报告_${EnergyApp.utils.formatDate(new Date())}.html`);
+            this._toast('策略对比报告已导出', 'success');
+        } catch (err) { this._toast('导出失败: ' + err.message, 'error'); }
+    }
+
+    /* ---- 策略沙盘 UI 绑定 ---- */
+    _bindStrategyUI() {
+        document.getElementById('btn-create-strategy')?.addEventListener('click', () => this._showCreateStrategyModal());
+        document.getElementById('btn-evaluate-all')?.addEventListener('click', () => this._evaluateAllStrategies());
+        document.getElementById('btn-export-strategy')?.addEventListener('click', () => this._exportStrategyReport());
+
+        this.strategyManager.onChange(() => this._renderStrategyList());
+    }
+
+    _showCreateStrategyModal() {
+        const modal = document.getElementById('scheme-modal');
+        document.getElementById('modal-title').textContent = '新建节能策略';
+        document.getElementById('modal-body').innerHTML = `
+            <input type="text" id="strategy-name" placeholder="策略名称">
+            <div style="margin-bottom:8px"><label style="font-size:13px;font-weight:600">负荷转移比例</label>
+                <div style="display:flex;align-items:center;gap:8px"><input type="range" id="param-load-shift" min="0" max="100" value="0" style="flex:1"><span id="val-load-shift">0%</span></div></div>
+            <div style="margin-bottom:8px"><label style="font-size:13px;font-weight:600">需量削减比例</label>
+                <div style="display:flex;align-items:center;gap:8px"><input type="range" id="param-demand-reduction" min="0" max="100" value="0" style="flex:1"><span id="val-demand-reduction">0%</span></div></div>
+            <div style="margin-bottom:8px"><label style="font-size:13px;font-weight:600">设备效率提升</label>
+                <div style="display:flex;align-items:center;gap:8px"><input type="range" id="param-efficiency" min="0" max="50" value="0" style="flex:1"><span id="val-efficiency">0%</span></div></div>
+            <div style="margin-bottom:12px"><label style="font-size:13px;font-weight:600">周末关停比例</label>
+                <div style="display:flex;align-items:center;gap:8px"><input type="range" id="param-weekend" min="0" max="100" value="0" style="flex:1"><span id="val-weekend">0%</span></div></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button class="btn-secondary" id="modal-cancel">取消</button>
+                <button class="btn-primary" id="modal-confirm">创建</button>
+            </div>`;
+        modal.style.display = 'flex';
+
+        // Slider value display
+        ['load-shift','demand-reduction','efficiency','weekend'].forEach(k => {
+            const slider = document.getElementById('param-' + k);
+            const valEl = document.getElementById('val-' + k);
+            if (slider && valEl) slider.addEventListener('input', () => { valEl.textContent = slider.value + '%'; });
+        });
+
+        document.getElementById('modal-cancel').onclick = () => this._hideModal();
+        document.getElementById('modal-confirm').onclick = async () => {
+            const name = document.getElementById('strategy-name').value.trim();
+            if (!name) { this._toast('请输入策略名称', 'warning'); return; }
+            const params = {
+                load_shift_pct: (document.getElementById('param-load-shift').value || 0) / 100,
+                demand_reduction_pct: (document.getElementById('param-demand-reduction').value || 0) / 100,
+                device_efficiency_gain: (document.getElementById('param-efficiency').value || 0) / 100,
+                weekend_shutdown_pct: (document.getElementById('param-weekend').value || 0) / 100
+            };
+            await this.strategyManager.create(name, '', params, false);
+            this._toast(`策略 "${name}" 已创建`, 'success');
+            this._hideModal();
+        };
+    }
+
+    async _evaluateAllStrategies() {
+        if (!this.strategyManager.strategies.length) {
+            this._toast('暂无策略可评估', 'warning'); return;
+        }
+        this._showLoading('正在评估策略...');
+        try {
+            await this.dashboardController.loadData();
+            const data = this.dashboardController.data;
+            const filter = this.filter.get();
+            await this.strategyManager.evaluateAll(data, filter);
+            this._toast('所有策略已评估完成', 'success');
+            // 自动把所有已评估策略加入对比
+            const ids = this.strategyManager.strategies.filter(s => s.results).map(s => s.strategy_id);
+            this.strategyManager.setComparison(ids);
+        } catch (err) { this._toast('评估失败: ' + err.message, 'error'); }
+        finally { this._hideLoading(); }
+    }
+
+    _renderStrategyList() {
+        const listEl = document.getElementById('strategy-list');
+        if (!listEl) return;
+        const strategies = this.strategyManager.strategies;
+        if (!strategies.length) {
+            listEl.innerHTML = '<div class="empty-state"><p>暂无策略，点击"新建策略"开始</p></div>';
+            return;
+        }
+        const currentFp = null; // 简化: 不实时计算指纹
+        let html = '';
+        strategies.forEach(s => {
+            const selected = this.strategyManager.selectedStrategyId === s.strategy_id;
+            const inComparison = this.strategyManager.activeComparison.includes(s.strategy_id);
+            const hasResults = !!s.results;
+            html += `<div class="strategy-card ${selected ? 'selected' : ''}" data-id="${s.strategy_id}">
+                <div class="strategy-card-header">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="checkbox" class="comparison-check" data-id="${s.strategy_id}" ${inComparison ? 'checked' : ''} ${!hasResults ? 'disabled' : ''}>
+                        <span class="strategy-name">${s.name}</span>
+                    </label>
+                    ${s.is_baseline ? '<span class="baseline-badge">基线</span>' : ''}
+                    <button class="strategy-delete" data-id="${s.strategy_id}">&times;</button>
+                </div>
+                <div class="strategy-card-params">
+                    <span>负荷转移: ${(s.parameters.load_shift_pct * 100).toFixed(0)}%</span>
+                    <span>需量削减: ${(s.parameters.demand_reduction_pct * 100).toFixed(0)}%</span>
+                    <span>效率: ${(s.parameters.device_efficiency_gain * 100).toFixed(0)}%</span>
+                    <span>周末: ${(s.parameters.weekend_shutdown_pct * 100).toFixed(0)}%</span>
+                </div>
+                ${hasResults ? `<div class="strategy-card-results">
+                    <span>碳减排: ${s.results.reductionPct.toFixed(1)}%</span>
+                    <span>节省: ¥${EnergyApp.utils.formatNumber(s.results.savings.cost, 0)}</span>
+                </div>` : '<div class="strategy-card-results" style="color:#9ca3af">未评估</div>'}
+            </div>`;
+        });
+        listEl.innerHTML = html;
+
+        // 事件绑定
+        listEl.querySelectorAll('.strategy-card').forEach(card => {
+            card.addEventListener('click', (e) => {
+                if (e.target.classList.contains('comparison-check') || e.target.classList.contains('strategy-delete')) return;
+                this.strategyManager.select(card.dataset.id);
+                this._renderStrategyDetail(card.dataset.id);
+            });
+        });
+        listEl.querySelectorAll('.comparison-check').forEach(cb => {
+            cb.addEventListener('change', () => { this.strategyManager.toggleComparison(cb.dataset.id); });
+        });
+        listEl.querySelectorAll('.strategy-delete').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await this.strategyManager.delete(btn.dataset.id);
+                this._toast('策略已删除', 'info');
+            });
+        });
+    }
+
+    _renderStrategyDetail(strategyId) {
+        const detailEl = document.getElementById('strategy-detail');
+        if (!detailEl) return;
+        const s = this.strategyManager.getStrategy(strategyId);
+        if (!s) { detailEl.innerHTML = '<div class="empty-state"><p>选择或创建一个策略</p></div>'; return; }
+
+        let html = `<h4>${s.name}${s.is_baseline ? ' <span class="baseline-badge">基线</span>' : ''}</h4>`;
+        html += '<div class="param-grid">';
+        html += `<div class="param-row"><label>负荷转移比例</label><input type="range" id="detail-load-shift" min="0" max="100" value="${s.parameters.load_shift_pct * 100}"><span>${(s.parameters.load_shift_pct * 100).toFixed(0)}%</span></div>`;
+        html += `<div class="param-row"><label>需量削减比例</label><input type="range" id="detail-demand-reduction" min="0" max="100" value="${s.parameters.demand_reduction_pct * 100}"><span>${(s.parameters.demand_reduction_pct * 100).toFixed(0)}%</span></div>`;
+        html += `<div class="param-row"><label>设备效率提升</label><input type="range" id="detail-efficiency" min="0" max="50" value="${s.parameters.device_efficiency_gain * 100}"><span>${(s.parameters.device_efficiency_gain * 100).toFixed(0)}%</span></div>`;
+        html += `<div class="param-row"><label>周末关停比例</label><input type="range" id="detail-weekend" min="0" max="100" value="${s.parameters.weekend_shutdown_pct * 100}"><span>${(s.parameters.weekend_shutdown_pct * 100).toFixed(0)}%</span></div>`;
+        html += '</div>';
+        html += '<button class="btn-primary" id="btn-save-params" style="margin-top:12px">保存参数</button>';
+
+        if (s.results) {
+            html += '<div class="results-section" style="margin-top:16px">';
+            html += `<h4>评估结果</h4>
+                <div class="result-grid">
+                    <div><label>基线碳排</label><div>${EnergyApp.utils.formatNumber(s.results.baseline.totalCarbon, 0)} kg</div></div>
+                    <div><label>预测碳排</label><div>${EnergyApp.utils.formatNumber(s.results.projected.totalCarbon, 0)} kg</div></div>
+                    <div><label>碳减排率</label><div style="color:#10b981;font-weight:700">${s.results.reductionPct.toFixed(1)}%</div></div>
+                    <div><label>节省成本</label><div style="color:#10b981;font-weight:700">¥${EnergyApp.utils.formatNumber(s.results.savings.cost, 0)}</div></div>
+                </div>`;
+            html += '</div>';
+        }
+        detailEl.innerHTML = html;
+
+        // Slider value display
+        ['load-shift','demand-reduction','efficiency','weekend'].forEach(k => {
+            const slider = detailEl.querySelector('#detail-' + k);
+            if (slider) slider.addEventListener('input', () => { slider.nextElementSibling.textContent = slider.value + '%'; });
+        });
+
+        // Save params
+        detailEl.querySelector('#btn-save-params')?.addEventListener('click', async () => {
+            const params = {
+                load_shift_pct: (detailEl.querySelector('#detail-load-shift').value || 0) / 100,
+                demand_reduction_pct: (detailEl.querySelector('#detail-demand-reduction').value || 0) / 100,
+                device_efficiency_gain: (detailEl.querySelector('#detail-efficiency').value || 0) / 100,
+                weekend_shutdown_pct: (detailEl.querySelector('#detail-weekend').value || 0) / 100
+            };
+            await this.strategyManager.update(strategyId, { parameters: params, results: null });
+            this._toast('参数已保存，请点击"全部评估"重新评估', 'info');
+        });
     }
 
     /* ---- 导入完成回调: 推进 sessionVersion, 刷新看板 ---- */
@@ -210,6 +403,45 @@ EnergyApp.App = class App {
         ]);
         const chunk = 5000;
         for (let i = 0; i < readings.length; i += chunk) await this.db.bulkAdd('meter_readings', readings.slice(i, i + chunk));
+
+        /* ===== 碳排因子 ===== */
+        const carbonFactors = [
+            { factor_id: 'CF-all-sharp_peak', building_id: 'all', period_type: 'sharp_peak', factor: 1.102, effective_date: '2025-01-01', source: 'regional_grid' },
+            { factor_id: 'CF-all-peak', building_id: 'all', period_type: 'peak', factor: 0.997, effective_date: '2025-01-01', source: 'regional_grid' },
+            { factor_id: 'CF-all-flat', building_id: 'all', period_type: 'flat', factor: 0.725, effective_date: '2025-01-01', source: 'regional_grid' },
+            { factor_id: 'CF-all-valley', building_id: 'all', period_type: 'valley', factor: 0.483, effective_date: '2025-01-01', source: 'regional_grid' }
+        ];
+        await this.db.bulkAdd('carbon_factors', carbonFactors);
+
+        /* ===== 需量电价 ===== */
+        const demandPricing = [
+            { demand_pricing_id: 'DP-2025', building_id: 'all', rate_per_kw: 45.00, billing_period: 'month', threshold_kw: 0, effective_date: '2025-01-01' }
+        ];
+        await this.db.bulkAdd('demand_pricing', demandPricing);
+
+        /* ===== 可迁移负荷 ===== */
+        const migratableLoads = [
+            { load_id: 'ML-B001-AC', building_id: 'B001', device_type: 'ac', device_id: null, from_period: 'sharp_peak', to_period: 'valley', max_capacity_kwh: 500, shift_efficiency: 0.95, description: 'A栋中央空调可迁移负荷' },
+            { load_id: 'ML-B003-DC', building_id: 'B003', device_type: 'electricity', device_id: null, from_period: 'peak', to_period: 'valley', max_capacity_kwh: 800, shift_efficiency: 0.90, description: 'C栋数据中心可迁移负荷' }
+        ];
+        await this.db.bulkAdd('migratable_loads', migratableLoads);
+
+        /* ===== 基线策略 + 优化策略 ===== */
+        const strategies = [
+            {
+                strategy_id: 'ST-baseline', name: '基线方案（当前状态）', description: '不做任何调整',
+                parameters: { load_shift_pct: 0, demand_reduction_pct: 0, device_efficiency_gain: 0, weekend_shutdown_pct: 0 },
+                results: null, filter_snapshot: null, data_fingerprint: null, is_baseline: true,
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+            },
+            {
+                strategy_id: 'ST-optimized', name: '综合优化方案', description: '负荷转移30%+需量削减10%+效率提升5%+周末关停40%',
+                parameters: { load_shift_pct: 0.3, demand_reduction_pct: 0.1, device_efficiency_gain: 0.05, weekend_shutdown_pct: 0.4 },
+                results: null, filter_snapshot: null, data_fingerprint: null, is_baseline: false,
+                created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+            }
+        ];
+        await this.db.bulkAdd('strategies', strategies);
     }
 
     _toast(msg, type = 'info') {

@@ -125,6 +125,18 @@ EnergyApp.WorkerManager = class WorkerManager {
                         result = { totalEnergy: o.totalEnergy, totalCost: o.totalCost };
                         break;
                     }
+                    case 'calculateCarbon':
+                        result = EnergyApp.Calculation.calculateCarbon(payload.meterReadings || [], payload.carbonFactors || [], payload.pricing || [], payload.filter || {});
+                        break;
+                    case 'calculateDemandCost':
+                        result = EnergyApp.Calculation.calculateDemandCost(payload.meterReadings || [], payload.demandPricing || [], payload.pricing || [], payload.filter || {});
+                        break;
+                    case 'calculateTransferable':
+                        result = EnergyApp.Calculation.calculateTransferableLoad(payload.meterReadings || [], payload.migratableLoads || [], payload.pricing || [], payload.filter || {});
+                        break;
+                    case 'evaluateStrategy':
+                        result = EnergyApp.Calculation.evaluateStrategy(payload.meterReadings || [], payload.carbonFactors || [], payload.demandPricing || [], payload.migratableLoads || [], payload.pricing || [], payload.filter || {}, payload.strategyParams || {});
+                        break;
                     default: result = {};
                 }
                 resolve(result);

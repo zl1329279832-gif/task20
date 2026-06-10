@@ -193,5 +193,200 @@ EnergyApp.Calculation = {
 
     _sumByYear(readings, year) { return readings.filter(r => new Date(r.timestamp).getFullYear() === year).reduce((s, r) => s + (Number(r.reading) || 0), 0); },
     _sumByMonth(readings, year, month) { return readings.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === year && d.getMonth() === month; }).reduce((s, r) => s + (Number(r.reading) || 0), 0); },
-    _sortObj(obj) { return Object.entries(obj).sort(([a],[b]) => a.localeCompare(b)).map(([,v]) => v); }
+    _sortObj(obj) { return Object.entries(obj).sort(([a],[b]) => a.localeCompare(b)).map(([,v]) => v); },
+
+    /* ===== 碳排放核算 ===== */
+    calculateCarbon(meterReadings, carbonFactors, pricing, filter) {
+        const filtered = this._filterReadings(meterReadings, filter);
+        let totalCarbon = 0, totalEnergy = 0;
+        const byBuilding = {}, byPeriodType = { sharp_peak: 0, peak: 0, flat: 0, valley: 0 }, byMonth = {}, byDevice = {};
+
+        filtered.forEach(r => {
+            const energy = Number(r.energy) || Number(r.reading) || 0;
+            const bid = r.building_id || 'unknown';
+            const pt = r.period_type || this._getPeriodType(r.timestamp, pricing);
+            const factor = this._getCarbonFactor(carbonFactors, bid, pt);
+            const carbon = energy * factor;
+
+            totalCarbon += carbon;
+            totalEnergy += energy;
+            byBuilding[bid] = (byBuilding[bid] || 0) + carbon;
+            if (byPeriodType[pt] !== undefined) byPeriodType[pt] += carbon;
+
+            const mk = EnergyApp.utils.getMonthKey(r.timestamp);
+            if (!byMonth[mk]) byMonth[mk] = { month: mk, carbon: 0, energy: 0 };
+            byMonth[mk].carbon += carbon;
+            byMonth[mk].energy += energy;
+
+            byDevice[r.meter_id] = (byDevice[r.meter_id] || 0) + carbon;
+        });
+
+        const byMonthArr = this._sortObj(byMonth);
+        byMonthArr.forEach(m => { m.intensity = m.energy > 0 ? m.carbon / m.energy : 0; });
+        const byDeviceArr = Object.entries(byDevice).map(([mid, carbon]) => ({ meter_id: mid, carbon })).sort((a,b) => b.carbon - a.carbon).slice(0, 15);
+        const byBuildingArr = Object.entries(byBuilding).map(([bid, carbon]) => ({ building_id: bid, carbon })).sort((a,b) => b.carbon - a.carbon);
+
+        return { totalCarbon, totalEnergy, intensity: totalEnergy > 0 ? totalCarbon / totalEnergy : 0, byBuilding: byBuildingArr, byPeriodType, byMonth: byMonthArr, byDevice: byDeviceArr };
+    },
+
+    /* ===== 需量成本计算 ===== */
+    calculateDemandCost(meterReadings, demandPricing, pricing, filter) {
+        const filtered = this._filterReadings(meterReadings, filter);
+        const dp = demandPricing && demandPricing.length > 0 ? demandPricing[0] : { rate_per_kw: 45, threshold_kw: 0 };
+        const ratePerKw = Number(dp.rate_per_kw) || 45;
+        const thresholdKw = Number(dp.threshold_kw) || 0;
+
+        const byBuildingMonth = {};
+        filtered.forEach(r => {
+            const bid = r.building_id || 'unknown';
+            const d = new Date(r.timestamp);
+            const mk = EnergyApp.utils.getMonthKey(d);
+            const key = bid + '|' + mk;
+            if (!byBuildingMonth[key]) byBuildingMonth[key] = { building_id: bid, month: mk, energy: 0, hours: new Set() };
+            const energy = Number(r.energy) || Number(r.reading) || 0;
+            byBuildingMonth[key].energy += energy;
+            byBuildingMonth[key].hours.add(d.toISOString().substring(0, 13));
+        });
+
+        let totalDemandCost = 0;
+        const byBuilding = {}, peakDemandByMonth = {};
+
+        Object.values(byBuildingMonth).forEach(bm => {
+            const hours = bm.hours.size || 1;
+            const peakKw = bm.energy / hours;
+            const cost = peakKw >= thresholdKw ? peakKw * ratePerKw : 0;
+            totalDemandCost += cost;
+
+            if (!byBuilding[bm.building_id]) byBuilding[bm.building_id] = { building_id: bm.building_id, totalCost: 0, peakKw: 0, months: [] };
+            byBuilding[bm.building_id].totalCost += cost;
+            byBuilding[bm.building_id].peakKw = Math.max(byBuilding[bm.building_id].peakKw, peakKw);
+            byBuilding[bm.building_id].months.push({ month: bm.month, peakKw, cost });
+
+            if (!peakDemandByMonth[bm.month]) peakDemandByMonth[bm.month] = { month: bm.month, peakKw: 0, cost: 0 };
+            peakDemandByMonth[bm.month].peakKw += peakKw;
+            peakDemandByMonth[bm.month].cost += cost;
+        });
+
+        return { totalDemandCost, byBuilding: Object.values(byBuilding).sort((a,b) => b.totalCost - a.totalCost), peakDemandByMonth: Object.values(peakDemandByMonth).sort((a,b) => a.month.localeCompare(b.month)), ratePerKw, thresholdKw };
+    },
+
+    /* ===== 可转移负荷计算 ===== */
+    calculateTransferableLoad(meterReadings, migratableLoads, pricing, filter) {
+        const filtered = this._filterReadings(meterReadings, filter);
+        let totalTransferable = 0, totalTransferred = 0, totalCostSavings = 0;
+        const byLoad = [];
+
+        (migratableLoads || []).forEach(load => {
+            const fromReadings = filtered.filter(r =>
+                (!load.building_id || load.building_id === 'all' || r.building_id === load.building_id) &&
+                (r.period_type || this._getPeriodType(r.timestamp, pricing)) === load.from_period
+            );
+            const availableKwh = fromReadings.reduce((s, r) => s + (Number(r.energy) || Number(r.reading) || 0), 0);
+            const maxCap = Number(load.max_capacity_kwh) || 0;
+            const efficiency = Number(load.shift_efficiency) || 0.95;
+            const days = new Set(fromReadings.map(r => new Date(r.timestamp).toDateString())).size || 1;
+            const transferable = Math.min(availableKwh * 0.3, maxCap * days);
+            const transferred = transferable * efficiency;
+
+            const fromPrice = this._getPrice(pricing, load.from_period);
+            const toPrice = this._getPrice(pricing, load.to_period);
+            const savings = transferable * fromPrice - transferred * toPrice;
+
+            totalTransferable += transferable;
+            totalTransferred += transferred;
+            totalCostSavings += savings;
+
+            byLoad.push({ load_id: load.load_id, building_id: load.building_id, device_type: load.device_type, from_period: load.from_period, to_period: load.to_period, availableKwh, transferable, transferred, efficiency, savings });
+        });
+
+        return { totalTransferable, totalTransferred, totalCostSavings, byLoad };
+    },
+
+    /* ===== 策略评估 ===== */
+    evaluateStrategy(meterReadings, carbonFactors, demandPricing, migratableLoads, pricing, filter, params) {
+        const filtered = this._filterReadings(meterReadings, filter);
+        const p = params || {};
+        const loadShiftPct = Number(p.load_shift_pct) || 0;
+        const demandReductionPct = Number(p.demand_reduction_pct) || 0;
+        const deviceEfficiencyGain = Number(p.device_efficiency_gain) || 0;
+        const weekendShutdownPct = Number(p.weekend_shutdown_pct) || 0;
+
+        /* 基线 */
+        const baselineCarbon = this.calculateCarbon(meterReadings, carbonFactors, pricing, filter);
+        const baselineDemand = this.calculateDemandCost(meterReadings, demandPricing, pricing, filter);
+        const baselineTransfer = this.calculateTransferableLoad(meterReadings, migratableLoads, pricing, filter);
+
+        const baseline = {
+            totalEnergy: baselineCarbon.totalEnergy,
+            totalCost: filtered.reduce((s, r) => s + (Number(r.cost) || 0), 0),
+            totalCarbon: baselineCarbon.totalCarbon,
+            peakDemand: baselineDemand.byBuilding.reduce((s, b) => s + b.peakKw, 0),
+            demandCost: baselineDemand.totalDemandCost
+        };
+
+        /* 调整后读数 */
+        const adjusted = filtered.map(r => {
+            const clone = Object.assign({}, r);
+            let energy = Number(clone.energy) || Number(clone.reading) || 0;
+            const pt = clone.period_type || this._getPeriodType(clone.timestamp, pricing);
+            const dow = new Date(clone.timestamp).getDay();
+            const isWeekend = dow === 0 || dow === 6;
+
+            if (loadShiftPct > 0 && (pt === 'sharp_peak' || pt === 'peak')) energy *= (1 - loadShiftPct);
+            if (deviceEfficiencyGain > 0) energy *= (1 - deviceEfficiencyGain);
+            if (weekendShutdownPct > 0 && isWeekend) energy *= (1 - weekendShutdownPct);
+
+            clone.energy = energy;
+            clone.reading = energy;
+            clone.cost = energy * this._getPrice(pricing, pt);
+            return clone;
+        });
+
+        const projectedCarbon = this.calculateCarbon(adjusted, carbonFactors, pricing, {});
+        let projectedCost = adjusted.reduce((s, r) => s + (Number(r.cost) || 0), 0);
+
+        const projectedDemandBase = baseline.peakDemand * (1 - demandReductionPct);
+        const dpRate = demandPricing && demandPricing.length > 0 ? (Number(demandPricing[0].rate_per_kw) || 45) : 45;
+        const projectedDemandCost = projectedDemandBase * dpRate;
+        projectedCost += projectedDemandCost;
+
+        const shiftSavings = baselineTransfer.totalCostSavings * loadShiftPct;
+        projectedCost -= shiftSavings;
+
+        const projected = {
+            totalEnergy: projectedCarbon.totalEnergy,
+            totalCost: projectedCost,
+            totalCarbon: projectedCarbon.totalCarbon,
+            peakDemand: projectedDemandBase,
+            demandCost: projectedDemandCost
+        };
+
+        const savings = {
+            energy: baseline.totalEnergy - projected.totalEnergy,
+            cost: baseline.totalCost - projected.totalCost,
+            carbon: baseline.totalCarbon - projected.totalCarbon,
+            demandCost: baseline.demandCost - projected.demandCost
+        };
+
+        const reductionPct = baseline.totalCarbon > 0 ? (savings.carbon / baseline.totalCarbon * 100) : 0;
+
+        const monthlyProjection = (baselineCarbon.byMonth || []).map(bm => {
+            const pm = (projectedCarbon.byMonth || []).find(m => m.month === bm.month);
+            return { month: bm.month, baselineCarbon: bm.carbon, baselineEnergy: bm.energy, projectedCarbon: pm ? pm.carbon : 0, projectedEnergy: pm ? pm.energy : 0, carbonSaved: bm.carbon - (pm ? pm.carbon : 0) };
+        });
+
+        return { baseline, projected, savings, reductionPct, monthlyProjection, strategyParams: p };
+    },
+
+    /* ===== 碳排因子查找 ===== */
+    _getCarbonFactor(carbonFactors, buildingId, periodType) {
+        if (!carbonFactors || !carbonFactors.length) return 0.583;
+        const specific = carbonFactors.find(f => f.building_id === buildingId && f.period_type === periodType);
+        if (specific) return Number(specific.factor) || 0.583;
+        const global = carbonFactors.find(f => (f.building_id === 'all' || !f.building_id) && f.period_type === periodType);
+        if (global) return Number(global.factor) || 0.583;
+        const any = carbonFactors.find(f => f.building_id === buildingId);
+        if (any) return Number(any.factor) || 0.583;
+        return 0.583;
+    }
 };

@@ -8,6 +8,8 @@ EnergyApp.Validator = {
         this._validateCrossReferences(data, results);
         this._validatePricing(data.pricing || [], results);
         this._validateDevices(data.devices || [], results);
+        this._validateCarbonFactors(data.carbon_factors || [], results);
+        this._validateMigratableLoads(data.migratable_loads || [], data.pricing || [], results);
         return results;
     },
 
@@ -94,6 +96,46 @@ EnergyApp.Validator = {
         const ids = new Set(devices.map(d => d.device_id));
         if (ids.size < devices.length)
             results.errors.push({ type: 'duplicate_device', message: `发现 ${devices.length - ids.size} 个重复的设备ID` });
+    },
+
+    _validateCarbonFactors(factors, results) {
+        if (!factors.length) return;
+        const validPeriods = ['sharp_peak', 'peak', 'flat', 'valley'];
+        factors.forEach(f => {
+            const val = Number(f.factor);
+            if (isNaN(val) || val <= 0)
+                results.errors.push({ type: 'invalid_carbon_factor', message: `碳排因子 ${f.factor_id || ''} 的值无效 (${f.factor})，必须大于0` });
+            else if (val > 2.0)
+                results.warnings.push({ type: 'high_carbon_factor', message: `碳排因子 ${f.factor_id || ''} 值偏高 (${val} kg CO2/kWh)，请确认是否为电网排放因子` });
+            if (f.period_type && !validPeriods.includes(f.period_type))
+                results.warnings.push({ type: 'unknown_period', message: `碳排因子 ${f.factor_id || ''} 的时段类型 ${f.period_type} 不在标准枚举中` });
+        });
+        const byPeriod = {};
+        factors.forEach(f => { byPeriod[f.period_type || 'unknown'] = (byPeriod[f.period_type || 'unknown'] || 0) + 1; });
+        const summary = Object.entries(byPeriod).map(([k, v]) => `${k}:${v}`).join(', ');
+        results.info.push({ type: 'carbon_factor_summary', message: `碳排因子共 ${factors.length} 条 (${summary})` });
+    },
+
+    _validateMigratableLoads(loads, pricing, results) {
+        if (!loads.length) return;
+        const validPeriods = ['sharp_peak', 'peak', 'flat', 'valley'];
+        let totalCapacity = 0;
+        loads.forEach(l => {
+            if (!validPeriods.includes(l.from_period))
+                results.errors.push({ type: 'invalid_from_period', message: `可迁移负荷 ${l.load_id || ''} 的源时段 ${l.from_period} 无效` });
+            if (!validPeriods.includes(l.to_period))
+                results.errors.push({ type: 'invalid_to_period', message: `可迁移负荷 ${l.load_id || ''} 的目标时段 ${l.to_period} 无效` });
+            if (l.from_period && l.to_period && l.from_period === l.to_period)
+                results.errors.push({ type: 'same_period', message: `可迁移负荷 ${l.load_id || ''} 的源时段和目标时段相同 (${l.from_period})` });
+            const eff = Number(l.shift_efficiency);
+            if (!isNaN(eff) && (eff < 0.5 || eff > 1.0))
+                results.warnings.push({ type: 'efficiency_out_of_range', message: `可迁移负荷 ${l.load_id || ''} 的迁移效率 ${eff} 超出合理范围 (0.5~1.0)` });
+            const cap = Number(l.max_capacity_kwh);
+            if (!isNaN(cap) && cap <= 0)
+                results.warnings.push({ type: 'zero_capacity', message: `可迁移负荷 ${l.load_id || ''} 的最大可迁移量为 ${cap}` });
+            if (!isNaN(cap) && cap > 0) totalCapacity += cap;
+        });
+        results.info.push({ type: 'migratable_load_summary', message: `可迁移负荷共 ${loads.length} 条，总可迁移容量 ${totalCapacity.toFixed(0)} kWh` });
     },
 
     _fmt(ts) {

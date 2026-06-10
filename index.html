@@ -11,11 +11,12 @@
         <header class="app-header">
             <div class="header-left">
                 <h1>楼宇能耗分析系统</h1>
-                <span class="version">v1.0</span>
+                <span class="version">v2.0</span>
             </div>
             <div class="header-right">
                 <button id="btn-import" class="nav-btn active">数据导入</button>
                 <button id="btn-dashboard" class="nav-btn">分析仪表盘</button>
+                <button id="btn-strategy" class="nav-btn">策略沙盘</button>
             </div>
         </header>
 
@@ -38,6 +39,9 @@
                             <button class="type-btn" data-type="ac_energy">空调能耗</button>
                             <button class="type-btn" data-type="lighting_energy">照明能耗</button>
                             <button class="type-btn" data-type="pricing">分时电价</button>
+                            <button class="type-btn" data-type="carbon_factor">碳排因子</button>
+                            <button class="type-btn" data-type="demand_pricing">需量电价</button>
+                            <button class="type-btn" data-type="migratable_load">可迁移负荷</button>
                         </div>
                     </div>
 
@@ -141,12 +145,30 @@
                     </div>
 
                     <div class="chart-section">
+                        <div class="chart-card" id="carbon-heatmap">
+                            <h3>碳排放热力图</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                        <div class="chart-card" id="carbon-ranking">
+                            <h3>设备碳排排行</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
                         <div class="chart-card" id="yoy-chart">
                             <h3>同比分析</h3>
                             <div class="chart-body"></div>
                         </div>
                         <div class="chart-card" id="mom-chart">
                             <h3>环比分析</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card full-width" id="projected-trend">
+                            <h3>策略预测 vs 实际趋势</h3>
                             <div class="chart-body"></div>
                         </div>
                     </div>
@@ -163,6 +185,44 @@
                     <button id="btn-save-scheme" class="btn-secondary">保存分析方案</button>
                     <button id="btn-load-scheme" class="btn-secondary">加载方案</button>
                     <button id="btn-export" class="btn-primary">导出HTML报告</button>
+                </div>
+            </section>
+
+            <section id="strategy-section" class="section">
+                <div class="strategy-header">
+                    <h2>碳排放核算与削峰填谷策略沙盘</h2>
+                    <div class="strategy-actions">
+                        <button id="btn-create-strategy" class="btn-primary">新建策略</button>
+                        <button id="btn-evaluate-all" class="btn-secondary">全部评估</button>
+                        <button id="btn-export-strategy" class="btn-secondary">导出对比报告</button>
+                    </div>
+                </div>
+
+                <div class="strategy-grid">
+                    <div class="strategy-list-panel">
+                        <h3>策略列表</h3>
+                        <div id="strategy-list"></div>
+                    </div>
+                    <div class="strategy-detail-panel">
+                        <h3>策略详情</h3>
+                        <div id="strategy-detail">
+                            <div class="empty-state"><p>选择或创建一个策略</p></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="strategy-comparison-section">
+                    <div class="chart-card full-width" id="strategy-comparison">
+                        <h3>策略对比</h3>
+                        <div class="chart-body"></div>
+                    </div>
+                </div>
+
+                <div class="strategy-summary-cards" id="strategy-summary-cards">
+                    <div class="summary-card"><div class="label">总碳排放</div><div class="value" id="total-carbon-value">-</div><div class="unit">kg CO₂</div></div>
+                    <div class="summary-card"><div class="label">需量成本</div><div class="value" id="demand-cost-value">-</div><div class="unit">元</div></div>
+                    <div class="summary-card"><div class="label">可转移负荷</div><div class="value" id="transferable-value">-</div><div class="unit">kWh</div></div>
+                    <div class="summary-card"><div class="label">碳排强度</div><div class="value" id="carbon-intensity-value">-</div><div class="unit">kg CO₂/kWh</div></div>
                 </div>
             </section>
         </main>
@@ -195,6 +255,7 @@
     <script src="js/filter.js"></script>
     <script src="js/storage.js"></script>
     <script src="js/export.js"></script>
+    <script src="js/strategy-manager.js"></script>
     <script src="js/import-controller.js"></script>
     <script src="js/dashboard-controller.js"></script>
     <script src="js/app.js"></script>

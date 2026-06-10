@@ -15,8 +15,13 @@ EnergyApp.DashboardController = class DashboardController {
             yoy: document.getElementById('yoy-chart'),
             mom: document.getElementById('mom-chart'),
             anomalies: document.getElementById('anomaly-alerts'),
-            recommendations: document.getElementById('recommendations')
+            recommendations: document.getElementById('recommendations'),
+            carbonHeatmap: document.getElementById('carbon-heatmap'),
+            carbonRanking: document.getElementById('carbon-ranking'),
+            projectedTrend: document.getElementById('projected-trend'),
+            strategyComparison: document.getElementById('strategy-comparison')
         };
+        this.strategyManager = null;
 
         /* ---------- 防串页状态 ---------- */
         this._queryId = 0;                      // 每次 refresh() 递增
@@ -41,12 +46,13 @@ EnergyApp.DashboardController = class DashboardController {
 
     async loadData() {
         try {
-            const [buildings, floors, rooms, devices, readings, ac, lighting, pricing] = await Promise.all([
+            const [buildings, floors, rooms, devices, readings, ac, lighting, pricing, carbonFactors, demandPricing, migratableLoads] = await Promise.all([
                 this.db.getAll('buildings'), this.db.getAll('floors'), this.db.getAll('rooms'),
                 this.db.getAll('devices'), this.db.getAll('meter_readings'), this.db.getAll('ac_energy'),
-                this.db.getAll('lighting_energy'), this.db.getAll('pricing')
+                this.db.getAll('lighting_energy'), this.db.getAll('pricing'),
+                this.db.getAll('carbon_factors'), this.db.getAll('demand_pricing'), this.db.getAll('migratable_loads')
             ]);
-            this.data = { buildings, floors, rooms, devices, readings, ac, lighting, pricing };
+            this.data = { buildings, floors, rooms, devices, readings, ac, lighting, pricing, carbonFactors, demandPricing, migratableLoads };
             this.filter.populateBuildings(buildings);
             if (readings.length) {
                 const ts = readings.map(r => new Date(r.timestamp).getTime()).filter(t => !isNaN(t));
@@ -72,7 +78,7 @@ EnergyApp.DashboardController = class DashboardController {
         /* 快照当前筛选条件, 用于后续一致性校验 */
         this._activeFilterSnapshot = JSON.parse(JSON.stringify(filter));
 
-        const { readings, pricing, floors, devices, buildings } = this.data;
+        const { readings, pricing, floors, devices, buildings, carbonFactors, demandPricing, migratableLoads } = this.data;
         if (!readings || !readings.length) { this._empty(); this._cachedReportData = null; return; }
 
         /* ===== 全部基于同一 filter 快照计算 ===== */
@@ -106,12 +112,40 @@ EnergyApp.DashboardController = class DashboardController {
         const recommendations = EnergyApp.Calculation.getRecommendations(readings, pricing, filter);
         EnergyApp.Chart.renderRecommendations(this._c.recommendations, recommendations);
 
+        /* ===== 碳排放核算 ===== */
+        const carbonData = EnergyApp.Calculation.calculateCarbon(readings, carbonFactors, pricing, filter);
+        if (this._c.carbonHeatmap) EnergyApp.Chart.renderCarbonHeatmap(this._c.carbonHeatmap, carbonData);
+        if (this._c.carbonRanking) EnergyApp.Chart.renderCarbonRanking(this._c.carbonRanking, carbonData);
+
+        /* ===== 需量成本 + 可转移负荷 (更新策略沙盘卡片) ===== */
+        const demandCost = EnergyApp.Calculation.calculateDemandCost(readings, demandPricing, pricing, filter);
+        const transferable = EnergyApp.Calculation.calculateTransferableLoad(readings, migratableLoads, pricing, filter);
+        this._updateStrategySummaryCards(carbonData, demandCost, transferable);
+
+        /* ===== 策略对比 ===== */
+        let strategyComparison = null;
+        if (this.strategyManager) {
+            const compData = this.strategyManager.getComparisonData();
+            if (compData.length > 0 && this._c.strategyComparison) {
+                EnergyApp.Chart.renderStrategyComparison(this._c.strategyComparison, compData);
+                strategyComparison = compData;
+            }
+            if (compData.length > 0 && this._c.projectedTrend) {
+                EnergyApp.Chart.renderProjectedTrend(this._c.projectedTrend, trend, compData[0].results);
+            } else if (this._c.projectedTrend) {
+                EnergyApp.Chart.renderProjectedTrend(this._c.projectedTrend, trend, null);
+            }
+        } else if (this._c.projectedTrend) {
+            EnergyApp.Chart.renderProjectedTrend(this._c.projectedTrend, trend, null);
+        }
+
         /* ===== 缓存完整的计算结果, 供导出报告使用 ===== */
         /* 只有在 queryId 仍然匹配时才缓存(防串页) */
         if (queryId === this._queryId) {
             const overview = EnergyApp.Calculation.getOverview(readings, pricing, filter);
             this._cachedReportData = {
                 overview, trend, ranking, heatmap, yoy, mom, anomalies, recommendations,
+                carbonData, demandCost, transferable, strategyComparison,
                 filter: JSON.parse(JSON.stringify(filter)),
                 generatedAt: new Date().toLocaleString('zh-CN'),
                 _queryId: queryId,
@@ -124,6 +158,14 @@ EnergyApp.DashboardController = class DashboardController {
         Object.values(this._c).forEach(c => {
             if (c) { const body = c.querySelector('.chart-body'); if (body) body.innerHTML = '<div class="empty-state"><p>请先导入数据</p></div>'; }
         });
+    }
+
+    _updateStrategySummaryCards(carbonData, demandCost, transferable) {
+        const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        setVal('total-carbon-value', carbonData ? EnergyApp.utils.formatNumber(carbonData.totalCarbon, 0) : '-');
+        setVal('demand-cost-value', demandCost ? EnergyApp.utils.formatNumber(demandCost.totalDemandCost, 0) : '-');
+        setVal('transferable-value', transferable ? EnergyApp.utils.formatNumber(transferable.totalTransferable, 0) : '-');
+        setVal('carbon-intensity-value', carbonData ? carbonData.intensity.toFixed(3) : '-');
     }
 
     _monthlyYoY(readings, filter) {

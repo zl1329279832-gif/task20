@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>楼宇能耗分析系统</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <header class="app-header">
+            <div class="header-left">
+                <h1>楼宇能耗分析系统</h1>
+                <span class="version">v1.0</span>
+            </div>
+            <div class="header-right">
+                <button id="btn-import" class="nav-btn active">数据导入</button>
+                <button id="btn-dashboard" class="nav-btn">分析仪表盘</button>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <section id="import-section" class="section active">
+                <div class="import-container">
+                    <div class="import-header">
+                        <h2>数据导入</h2>
+                        <p>支持 CSV 和 JSON 格式，系统自动识别字段并进行异常校验</p>
+                    </div>
+
+                    <div class="data-type-selector">
+                        <label>选择数据类型：</label>
+                        <div class="type-buttons">
+                            <button class="type-btn active" data-type="building">楼栋</button>
+                            <button class="type-btn" data-type="floor">楼层</button>
+                            <button class="type-btn" data-type="room">房间</button>
+                            <button class="type-btn" data-type="device">设备</button>
+                            <button class="type-btn" data-type="meter_reading">电表读数</button>
+                            <button class="type-btn" data-type="ac_energy">空调能耗</button>
+                            <button class="type-btn" data-type="lighting_energy">照明能耗</button>
+                            <button class="type-btn" data-type="pricing">分时电价</button>
+                        </div>
+                    </div>
+
+                    <div id="drop-zone" class="drop-zone">
+                        <div class="drop-zone-content">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            <p>拖拽文件到此处，或点击选择文件</p>
+                            <span>支持 .csv .json</span>
+                        </div>
+                        <input type="file" id="file-input" accept=".csv,.json" multiple style="display:none">
+                    </div>
+
+                    <div id="field-mapping" class="field-mapping" style="display:none">
+                        <h3>字段映射</h3>
+                        <div id="mapping-content"></div>
+                    </div>
+
+                    <div id="validation-result" class="validation-result" style="display:none">
+                        <h3>校验结果</h3>
+                        <div id="validation-content"></div>
+                    </div>
+
+                    <div id="import-summary" class="import-summary" style="display:none">
+                        <h3>数据预览</h3>
+                        <div id="summary-content"></div>
+                        <button id="btn-do-import" class="btn-primary">导入数据</button>
+                    </div>
+                </div>
+            </section>
+
+            <section id="dashboard-section" class="section">
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <label>楼栋：</label>
+                        <select id="filter-building"><option value="all">全部</option></select>
+                    </div>
+                    <div class="filter-group">
+                        <label>开始日期：</label>
+                        <input type="date" id="filter-start-date">
+                    </div>
+                    <div class="filter-group">
+                        <label>结束日期：</label>
+                        <input type="date" id="filter-end-date">
+                    </div>
+                    <div class="filter-group">
+                        <label>能耗类型：</label>
+                        <select id="filter-energy-type">
+                            <option value="all">全部</option>
+                            <option value="electricity">电力</option>
+                            <option value="ac">空调</option>
+                            <option value="lighting">照明</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label>计费口径：</label>
+                        <select id="filter-billing">
+                            <option value="actual">实际用电</option>
+                            <option value="cost">电费成本</option>
+                        </select>
+                    </div>
+                    <div class="filter-group time-periods">
+                        <button class="period-btn" data-period="day">日</button>
+                        <button class="period-btn active" data-period="month">月</button>
+                        <button class="period-btn" data-period="quarter">季</button>
+                        <button class="period-btn" data-period="year">年</button>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="chart-section overview-section">
+                        <div class="chart-card" id="overview-chart">
+                            <h3>楼栋能耗总览</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                        <div class="chart-card" id="anomaly-alerts">
+                            <h3>异常能耗提醒</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card full-width" id="trend-chart">
+                            <h3>尖峰平谷用电趋势</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card" id="heatmap-chart">
+                            <h3>楼层能耗热力图</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                        <div class="chart-card" id="ranking-chart">
+                            <h3>设备能耗排行</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card" id="yoy-chart">
+                            <h3>同比分析</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                        <div class="chart-card" id="mom-chart">
+                            <h3>环比分析</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-section">
+                        <div class="chart-card full-width" id="recommendations">
+                            <h3>节能建议</h3>
+                            <div class="chart-body"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="action-bar">
+                    <button id="btn-save-scheme" class="btn-secondary">保存分析方案</button>
+                    <button id="btn-load-scheme" class="btn-secondary">加载方案</button>
+                    <button id="btn-export" class="btn-primary">导出HTML报告</button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="scheme-modal" class="modal" style="display:none">
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">保存分析方案</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+    <div id="loading-overlay" class="loading-overlay" style="display:none">
+        <div class="spinner"></div>
+        <p id="loading-text">处理中...</p>
+    </div>
+
+    <script src="js/utils.js"></script>
+    <script src="js/db.js"></script>
+    <script src="js/parser.js"></script>
+    <script src="js/validator.js"></script>
+    <script src="js/worker-manager.js"></script>
+    <script src="js/calculation.js"></script>
+    <script src="js/chart.js"></script>
+    <script src="js/filter.js"></script>
+    <script src="js/storage.js"></script>
+    <script src="js/export.js"></script>
+    <script src="js/import-controller.js"></script>
+    <script src="js/dashboard-controller.js"></script>
+    <script src="js/app.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

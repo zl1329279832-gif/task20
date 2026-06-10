@@ -1,4 +1,5 @@
 /* ===== 主应用控制器 ===== */
+/* 修复: 导入后推进 sessionVersion 并通知 dashboard; 方案保存附带数据指纹; 方案加载校验指纹 */
 window.EnergyApp = window.EnergyApp || {};
 
 EnergyApp.App = class App {
@@ -18,7 +19,7 @@ EnergyApp.App = class App {
         this.workerManager = new EnergyApp.WorkerManager('./workers/processor.js');
         this.importController = new EnergyApp.ImportController(this.db, this.workerManager);
         this.importController.onImportComplete = () => this._onImported();
-        this.dashboardController = new EnergyApp.DashboardController(this.db, this.filter, this.storage);
+        this.dashboardController = new EnergyApp.DashboardController(this.db, this.filter, this.storage, this.workerManager);
 
         this._bindNav();
         this._bindActions();
@@ -55,6 +56,7 @@ EnergyApp.App = class App {
         document.querySelector('.modal-overlay')?.addEventListener('click', () => this._hideModal());
     }
 
+    /* ---- 保存方案: 附带数据指纹 ---- */
     async _showSaveModal() {
         const modal = document.getElementById('scheme-modal');
         document.getElementById('modal-title').textContent = '保存分析方案';
@@ -64,26 +66,45 @@ EnergyApp.App = class App {
         document.getElementById('modal-confirm').onclick = async () => {
             const name = document.getElementById('scheme-name').value.trim();
             if (!name) { this._toast('请输入名称', 'warning'); return; }
-            await this.storage.saveScheme(name, this.filter.toJSON());
-            this._toast(`方案 "${name}" 已保存`, 'success');
+            const fingerprint = await this.storage.computeDataFingerprint();
+            await this.storage.saveScheme(name, this.filter.toJSON(), '', fingerprint);
+            this._toast(`方案 "${name}" 已保存（含数据指纹）`, 'success');
             this._hideModal();
         };
     }
 
+    /* ---- 加载方案: 校验数据指纹 ---- */
     async _showLoadModal() {
         const modal = document.getElementById('scheme-modal');
         document.getElementById('modal-title').textContent = '加载分析方案';
         const schemes = await this.storage.getAllSchemes();
+        const currentFp = await this.storage.computeDataFingerprint();
         let html = '';
         if (!schemes.length) html = '<p style="text-align:center;color:#9ca3af;padding:20px">暂无已保存的方案</p>';
-        else schemes.forEach(s => { html += `<div class="scheme-item" data-id="${s.scheme_id}"><div><div class="scheme-name">${s.name}</div><div class="scheme-date">${new Date(s.updatedAt).toLocaleString('zh-CN')}</div></div><button class="scheme-delete" data-id="${s.scheme_id}">&times;</button></div>`; });
+        else schemes.forEach(s => {
+            const cmp = this.storage.compareFingerprint(s.dataFingerprint, currentFp);
+            const warnBadge = cmp.match ? '' : `<span style="color:#f59e0b;font-size:11px;margin-left:8px" title="${cmp.reason}">⚠ 数据已变更</span>`;
+            html += `<div class="scheme-item" data-id="${s.scheme_id}"><div><div class="scheme-name">${s.name}${warnBadge}</div><div class="scheme-date">${new Date(s.updatedAt).toLocaleString('zh-CN')}</div></div><button class="scheme-delete" data-id="${s.scheme_id}">&times;</button></div>`;
+        });
         document.getElementById('modal-body').innerHTML = html;
         modal.style.display = 'flex';
         document.querySelectorAll('.scheme-item').forEach(item => {
             item.addEventListener('click', async (e) => {
                 if (e.target.classList.contains('scheme-delete')) return;
                 const scheme = await this.storage.getScheme(item.dataset.id);
-                if (scheme) { this.filter.fromJSON(scheme.filter); this._toast(`已加载 "${scheme.name}"`, 'success'); this._hideModal(); await this.dashboardController.init(); }
+                if (scheme) {
+                    /* 指纹校验 */
+                    if (scheme.dataFingerprint) {
+                        const cmp = this.storage.compareFingerprint(scheme.dataFingerprint, currentFp);
+                        if (!cmp.match) {
+                            this._toast(`方案 "${scheme.name}" 的数据已变更: ${cmp.reason}，筛选条件可能不适用`, 'warning');
+                        }
+                    }
+                    this.filter.fromJSON(scheme.filter);
+                    this._toast(`已加载 "${scheme.name}"`, 'success');
+                    this._hideModal();
+                    await this.dashboardController.init();
+                }
             });
         });
         document.querySelectorAll('.scheme-delete').forEach(btn => {
@@ -93,18 +114,32 @@ EnergyApp.App = class App {
 
     _hideModal() { document.getElementById('scheme-modal').style.display = 'none'; }
 
+    /* ---- 导出报告: 使用缓存的看板数据, 保证一致性 ---- */
     _exportReport() {
         try {
             const data = this.dashboardController.getReportData();
+            if (!data || !data.overview) {
+                this._toast('无可用数据，请先导入数据并等待看板渲染完成', 'warning');
+                return;
+            }
             const html = EnergyApp.Export.generateReport(data);
             EnergyApp.Export.download(html);
             this._toast('报告已导出', 'success');
         } catch (err) { this._toast('导出失败: ' + err.message, 'error'); }
     }
 
+    /* ---- 导入完成回调: 推进 sessionVersion, 刷新看板 ---- */
     async _onImported() {
+        /* 1. 推进数据代次 — 使所有未完成的 Worker 任务失效 */
+        this.workerManager.bumpSessionVersion();
+
+        /* 2. 通知看板缓存失效 */
+        this.dashboardController.invalidateData();
+
         this._toast('数据导入完成', 'info');
         this._switchView('dashboard');
+
+        /* 3. 重新加载数据并渲染 */
         await this.dashboardController.init();
     }
 

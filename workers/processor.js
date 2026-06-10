@@ -1,8 +1,9 @@
 /* ===== Web Worker - 数据处理引擎 ===== */
 /* 在独立线程中运行，处理大数据量的解析、聚合和异常检测 */
+/* 修复: 同比/环比使用 filtered 而非原始 readings; 回包携带 sessionVersion/queryId */
 
 self.onmessage = function(e) {
-    const { type, taskId, payload } = e.data;
+    const { type, taskId, payload, sessionVersion, queryId } = e.data;
     try {
         let result;
         switch (type) {
@@ -11,9 +12,9 @@ self.onmessage = function(e) {
             case 'calculateStats':  result = calculateStats(payload); break;
             default: throw new Error('未知任务类型: ' + type);
         }
-        self.postMessage({ taskId, result, error: null });
+        self.postMessage({ taskId, result, error: null, sessionVersion, queryId });
     } catch (err) {
-        self.postMessage({ taskId, result: null, error: err.message });
+        self.postMessage({ taskId, result: null, error: err.message, sessionVersion, queryId });
     }
 };
 
@@ -70,19 +71,38 @@ function aggregateData(p) {
     });
     const timeTrend = Object.values(byPeriod).sort((a, b) => a.period.localeCompare(b.period));
 
-    // 同比
+    // ========== 修复: 同比/环比使用 filtered(已筛选数据) ==========
+    // 同比 — 基于 filtered
     const now = filter.endDate ? new Date(filter.endDate) : new Date();
     const cy = now.getFullYear();
-    const curYear = readings.filter(r => new Date(r.timestamp).getFullYear() === cy).reduce((s, r) => s + (Number(r.reading) || 0), 0);
-    const prevYear = readings.filter(r => new Date(r.timestamp).getFullYear() === cy - 1).reduce((s, r) => s + (Number(r.reading) || 0), 0);
-    const yoy = { current: curYear, previous: prevYear, change: prevYear > 0 ? ((curYear - prevYear) / prevYear * 100) : 0, currentYear: cy, previousYear: cy - 1 };
+    const curYear = filtered.filter(r => new Date(r.timestamp).getFullYear() === cy)
+                            .reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const prevYear = filtered.filter(r => new Date(r.timestamp).getFullYear() === cy - 1)
+                             .reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const yoy = {
+        current: curYear, previous: prevYear,
+        change: prevYear > 0 ? ((curYear - prevYear) / prevYear * 100) : 0,
+        currentYear: cy, previousYear: cy - 1
+    };
 
-    // 环比
+    // 环比 — 基于 filtered
     const cm = now.getMonth();
-    const curMonth = readings.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === cy && d.getMonth() === cm; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const curMonth = filtered.filter(r => {
+        const d = new Date(r.timestamp);
+        return d.getFullYear() === cy && d.getMonth() === cm;
+    }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+
     const pm = new Date(cy, cm - 1, 1);
-    const prevMonth = readings.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === pm.getFullYear() && d.getMonth() === pm.getMonth(); }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
-    const mom = { current: curMonth, previous: prevMonth, change: prevMonth > 0 ? ((curMonth - prevMonth) / prevMonth * 100) : 0, currentMonth: cm + 1, previousMonth: pm.getMonth() + 1 };
+    const prevMonth = filtered.filter(r => {
+        const d = new Date(r.timestamp);
+        return d.getFullYear() === pm.getFullYear() && d.getMonth() === pm.getMonth();
+    }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+
+    const mom = {
+        current: curMonth, previous: prevMonth,
+        change: prevMonth > 0 ? ((curMonth - prevMonth) / prevMonth * 100) : 0,
+        currentMonth: cm + 1, previousMonth: pm.getMonth() + 1
+    };
 
     return { buildingTotals, floorHeatmap, deviceRanking, timeTrend, yoy, mom };
 }

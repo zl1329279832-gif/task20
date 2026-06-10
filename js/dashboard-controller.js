@@ -1,9 +1,11 @@
 /* ===== 仪表盘控制器 ===== */
+/* 修复: queryId 防串页; 缓存报告数据保证导出一致性; 防抖快速切换; 接受 workerManager 引用 */
 window.EnergyApp = window.EnergyApp || {};
 
 EnergyApp.DashboardController = class DashboardController {
-    constructor(db, filter, storage) {
+    constructor(db, filter, storage, workerManager) {
         this.db = db; this.filter = filter; this.storage = storage;
+        this.workerManager = workerManager || null;
         this.data = {};
         this._c = {
             overview: document.getElementById('overview-chart'),
@@ -15,10 +17,27 @@ EnergyApp.DashboardController = class DashboardController {
             anomalies: document.getElementById('anomaly-alerts'),
             recommendations: document.getElementById('recommendations')
         };
-        this.filter.onChange(() => this.refresh());
+
+        /* ---------- 防串页状态 ---------- */
+        this._queryId = 0;                      // 每次 refresh() 递增
+        this._activeFilterSnapshot = null;       // 当前正在显示的数据对应的筛选快照
+        this._cachedReportData = null;           // 缓存: 供导出使用, 保证与看板一致
+        this._dataSessionVersion = 0;            // 数据加载时的 sessionVersion
+        this._refreshTimer = null;               // 防抖定时器
+
+        this.filter.onChange(() => this._debouncedRefresh());
     }
 
-    async init() { await this.loadData(); this.refresh(); }
+    /* ---- 防抖: 快速连续切换筛选时, 只在最后一次稳定后刷新 ---- */
+    _debouncedRefresh() {
+        if (this._refreshTimer) clearTimeout(this._refreshTimer);
+        this._refreshTimer = setTimeout(() => this.refresh(), 150);
+    }
+
+    async init() {
+        await this.loadData();
+        this.refresh();
+    }
 
     async loadData() {
         try {
@@ -33,34 +52,78 @@ EnergyApp.DashboardController = class DashboardController {
                 const ts = readings.map(r => new Date(r.timestamp).getTime()).filter(t => !isNaN(t));
                 if (ts.length) this.filter.setDateRange(new Date(Math.min(...ts)), new Date(Math.max(...ts)));
             }
+            /* 记录数据加载时的 session 版本 */
+            this._dataSessionVersion = this.workerManager ? this.workerManager.getSessionVersion() : Date.now();
+            /* 数据变了, 旧缓存无效 */
+            this._cachedReportData = null;
         } catch (err) { console.error('加载数据失败:', err); }
     }
 
-    refresh() {
-        const filter = this.filter.get();
-        const { readings, pricing, floors, devices, buildings } = this.data;
-        if (!readings || !readings.length) { this._empty(); return; }
+    /* ---- 标记数据已过期(外部导入后调用) ---- */
+    invalidateData() {
+        this._cachedReportData = null;
+        this._activeFilterSnapshot = null;
+    }
 
+    refresh() {
+        const queryId = ++this._queryId;
+        const filter = this.filter.get();
+
+        /* 快照当前筛选条件, 用于后续一致性校验 */
+        this._activeFilterSnapshot = JSON.parse(JSON.stringify(filter));
+
+        const { readings, pricing, floors, devices, buildings } = this.data;
+        if (!readings || !readings.length) { this._empty(); this._cachedReportData = null; return; }
+
+        /* ===== 全部基于同一 filter 快照计算 ===== */
         const byBuilding = EnergyApp.Calculation.getByBuilding(readings, filter);
-        const buildingData = byBuilding.map(b => { const info = (buildings||[]).find(bl => bl.building_id === b.building_id); return { ...b, building_name: info ? info.building_name : b.building_id }; });
+        const buildingData = byBuilding.map(b => {
+            const info = (buildings||[]).find(bl => bl.building_id === b.building_id);
+            return { ...b, building_name: info ? info.building_name : b.building_id };
+        });
         EnergyApp.Chart.renderOverview(this._c.overview, buildingData, buildings);
 
-        EnergyApp.Chart.renderHeatmap(this._c.heatmap, EnergyApp.Calculation.getFloorHeatmap(readings, floors, devices, filter));
-        EnergyApp.Chart.renderRanking(this._c.ranking, EnergyApp.Calculation.getDeviceRanking(readings, devices, filter));
-        EnergyApp.Chart.renderTrend(this._c.trend, EnergyApp.Calculation.getTimeTrend(readings, pricing, filter));
+        const heatmap = EnergyApp.Calculation.getFloorHeatmap(readings, floors, devices, filter);
+        EnergyApp.Chart.renderHeatmap(this._c.heatmap, heatmap);
+
+        const ranking = EnergyApp.Calculation.getDeviceRanking(readings, devices, filter);
+        EnergyApp.Chart.renderRanking(this._c.ranking, ranking);
+
+        const trend = EnergyApp.Calculation.getTimeTrend(readings, pricing, filter);
+        EnergyApp.Chart.renderTrend(this._c.trend, trend);
 
         const yoy = EnergyApp.Calculation.getYoY(readings, filter);
-        EnergyApp.Chart.renderYoY(this._c.yoy, yoy, this._monthlyYoY(readings, filter));
+        const monthlyDetail = this._monthlyYoY(readings, filter);
+        EnergyApp.Chart.renderYoY(this._c.yoy, yoy, monthlyDetail);
 
         const mom = EnergyApp.Calculation.getMoM(readings, filter);
-        EnergyApp.Chart.renderMoM(this._c.mom, mom, this._dailyMoM(readings, filter));
+        const dailyDetail = this._dailyMoM(readings, filter);
+        EnergyApp.Chart.renderMoM(this._c.mom, mom, dailyDetail);
 
-        EnergyApp.Chart.renderAnomalies(this._c.anomalies, EnergyApp.Calculation.detectAnomalies(readings, filter));
-        EnergyApp.Chart.renderRecommendations(this._c.recommendations, EnergyApp.Calculation.getRecommendations(readings, pricing, filter));
+        const anomalies = EnergyApp.Calculation.detectAnomalies(readings, filter);
+        EnergyApp.Chart.renderAnomalies(this._c.anomalies, anomalies);
+
+        const recommendations = EnergyApp.Calculation.getRecommendations(readings, pricing, filter);
+        EnergyApp.Chart.renderRecommendations(this._c.recommendations, recommendations);
+
+        /* ===== 缓存完整的计算结果, 供导出报告使用 ===== */
+        /* 只有在 queryId 仍然匹配时才缓存(防串页) */
+        if (queryId === this._queryId) {
+            const overview = EnergyApp.Calculation.getOverview(readings, pricing, filter);
+            this._cachedReportData = {
+                overview, trend, ranking, heatmap, yoy, mom, anomalies, recommendations,
+                filter: JSON.parse(JSON.stringify(filter)),
+                generatedAt: new Date().toLocaleString('zh-CN'),
+                _queryId: queryId,
+                _dataSessionVersion: this._dataSessionVersion
+            };
+        }
     }
 
     _empty() {
-        Object.values(this._c).forEach(c => { if (c) { const body = c.querySelector('.chart-body'); if (body) body.innerHTML = '<div class="empty-state"><p>请先导入数据</p></div>'; } });
+        Object.values(this._c).forEach(c => {
+            if (c) { const body = c.querySelector('.chart-body'); if (body) body.innerHTML = '<div class="empty-state"><p>请先导入数据</p></div>'; }
+        });
     }
 
     _monthlyYoY(readings, filter) {
@@ -88,7 +151,26 @@ EnergyApp.DashboardController = class DashboardController {
         return daily;
     }
 
+    /**
+     * 获取报告数据 — 优先返回缓存, 保证与看板显示一致
+     * 如果缓存不存在(首次或数据刚变更), 则重新计算
+     */
     getReportData() {
+        if (this._cachedReportData) {
+            /* 校验缓存的 filter 是否与当前 filter 一致 */
+            const currentFilter = JSON.stringify(this.filter.get());
+            const cachedFilter = JSON.stringify(this._cachedReportData.filter);
+            if (currentFilter === cachedFilter) {
+                return { ...this._cachedReportData, generatedAt: new Date().toLocaleString('zh-CN') };
+            }
+        }
+        /* 缓存不可用, 实时计算并缓存 */
+        this.refresh();
+        return this._cachedReportData || this._buildReportData();
+    }
+
+    /* 强制从当前数据构建报告(兜底) */
+    _buildReportData() {
         const filter = this.filter.get();
         const { readings, pricing, floors, devices } = this.data;
         return {
@@ -100,7 +182,7 @@ EnergyApp.DashboardController = class DashboardController {
             mom: EnergyApp.Calculation.getMoM(readings, filter),
             anomalies: EnergyApp.Calculation.detectAnomalies(readings, filter),
             recommendations: EnergyApp.Calculation.getRecommendations(readings, pricing, filter),
-            filter,
+            filter: JSON.parse(JSON.stringify(filter)),
             generatedAt: new Date().toLocaleString('zh-CN')
         };
     }

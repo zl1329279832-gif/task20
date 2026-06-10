@@ -1,4 +1,5 @@
 /* ===== 导入控制器 ===== */
+/* 修复: 低置信度字段映射不得直接入库; 每次导入携带 importId; 导入前校验 mapping 置信度 */
 window.EnergyApp = window.EnergyApp || {};
 
 EnergyApp.ImportController = class ImportController {
@@ -8,6 +9,7 @@ EnergyApp.ImportController = class ImportController {
         this.currentType = 'building';
         this.parsedData = null;
         this.currentMapping = null;
+        this.importId = 0;                   // 每次成功导入递增, 供外部感知
         this.dropZone = document.getElementById('drop-zone');
         this.fileInput = document.getElementById('file-input');
         this.importBtn = document.getElementById('btn-do-import');
@@ -46,19 +48,43 @@ EnergyApp.ImportController = class ImportController {
         } finally { this._hideLoading(); }
     }
 
+    /* ---- 字段映射展示 & 置信度门控 ---- */
     _showFieldMapping(mapping, headers) {
         const section = document.getElementById('field-mapping');
         const content = document.getElementById('mapping-content');
         section.style.display = 'block';
         let html = '';
+        let hasLowConfidence = false;
+        let lowFields = [];
+
         Object.entries(mapping.mapping).forEach(([field, info]) => {
-            const cls = info.confidence >= 0.9 ? 'confidence-high' : info.confidence >= 0.7 ? 'confidence-medium' : 'confidence-low';
-            const label = info.confidence >= 0.9 ? '高' : info.confidence >= 0.7 ? '中' : '低';
-            html += `<div class="mapping-item"><span class="field-name">${field}</span><span class="arrow">←</span><span class="header-name">${info.header}</span><span class="${cls}">(${label} ${(info.confidence*100).toFixed(0)}%)</span></div>`;
+            const conf = info.confidence;
+            const cls = conf >= 0.9 ? 'confidence-high' : conf >= 0.7 ? 'confidence-medium' : 'confidence-low';
+            const label = conf >= 0.9 ? '高' : conf >= 0.7 ? '中' : '低';
+            html += `<div class="mapping-item"><span class="field-name">${field}</span><span class="arrow">←</span><span class="header-name">${info.header}</span><span class="${cls}">(${label} ${(conf*100).toFixed(0)}%)</span></div>`;
+            if (conf < 0.5) { hasLowConfidence = true; lowFields.push(field); }
         });
         if (mapping.unmapped && mapping.unmapped.length) html += `<div style="margin-top:12px;color:#9ca3af;font-size:12px">未映射列: ${mapping.unmapped.join(', ')}</div>`;
+
+        /* ===== 低置信度阻断提示 ===== */
+        if (hasLowConfidence) {
+            html += `<div class="validation-item error" style="margin-top:12px">
+                <span>❌</span>
+                <span>以下字段映射置信度过低（&lt;50%），不允许直接导入: <b>${lowFields.join(', ')}</b>。请检查源文件列名或手动修正映射。</span>
+            </div>`;
+        }
         content.innerHTML = html;
         this.currentMapping = mapping;
+
+        /* 禁用导入按钮, 直到用户确认 */
+        this.importBtn.disabled = hasLowConfidence;
+        if (hasLowConfidence) {
+            this.importBtn.title = '存在低置信度字段映射，请修正后再导入';
+            this.importBtn.style.opacity = '0.5';
+        } else {
+            this.importBtn.title = '';
+            this.importBtn.style.opacity = '';
+        }
     }
 
     _showPreview(parsed) {
@@ -108,8 +134,21 @@ EnergyApp.ImportController = class ImportController {
         });
     }
 
+    /* ---- 检查是否存在低置信度映射 ---- */
+    _hasLowConfidenceMapping() {
+        if (!this.currentMapping || !this.currentMapping.mapping) return false;
+        return Object.values(this.currentMapping.mapping).some(info => info.confidence < 0.5);
+    }
+
     async _doImport() {
         if (!this.parsedData || !this.parsedData.length) { this._toast('请先选择文件', 'warning'); return; }
+
+        /* ===== 低置信度门控: 不允许导入 ===== */
+        if (this._hasLowConfidenceMapping()) {
+            this._toast('存在低置信度字段映射（<50%），请修正后再导入', 'error');
+            return;
+        }
+
         this._showLoading('正在导入...');
         try {
             for (const r of this.parsedData) {
@@ -118,11 +157,16 @@ EnergyApp.ImportController = class ImportController {
                 const converted = this._convertRows(r.parsed.rows, r.mapping.mapping);
                 if (converted.length > 0) { await this.db.clear(storeName); await this.db.bulkAdd(storeName, converted); }
             }
+            this.importId++;
             this._toast('导入成功', 'success');
             this.parsedData = null;
+            this.currentMapping = null;
             document.getElementById('field-mapping').style.display = 'none';
             document.getElementById('validation-result').style.display = 'none';
             document.getElementById('import-summary').style.display = 'none';
+            /* 恢复导入按钮状态 */
+            this.importBtn.disabled = false;
+            this.importBtn.style.opacity = '';
             if (this.onImportComplete) this.onImportComplete();
         } catch (err) { this._toast('导入失败: ' + err.message, 'error'); }
         finally { this._hideLoading(); }

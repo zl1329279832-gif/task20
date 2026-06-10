@@ -10,6 +10,7 @@ EnergyApp.App = class App {
         this.importController = null;
         this.dashboardController = null;
         this.currentView = 'import';
+        this._dataVersion = 0;
     }
 
     async init() {
@@ -18,7 +19,9 @@ EnergyApp.App = class App {
         this.workerManager = new EnergyApp.WorkerManager('./workers/processor.js');
         this.importController = new EnergyApp.ImportController(this.db, this.workerManager);
         this.importController.onImportComplete = () => this._onImported();
-        this.dashboardController = new EnergyApp.DashboardController(this.db, this.filter, this.storage);
+        this.importController.onDataVersionChange = (v) => { this._dataVersion = v; };
+        this._dataVersion = this.importController.getDataVersion();
+        this.dashboardController = new EnergyApp.DashboardController(this.db, this.filter, this.storage, this.workerManager);
 
         this._bindNav();
         this._bindActions();
@@ -64,7 +67,7 @@ EnergyApp.App = class App {
         document.getElementById('modal-confirm').onclick = async () => {
             const name = document.getElementById('scheme-name').value.trim();
             if (!name) { this._toast('请输入名称', 'warning'); return; }
-            await this.storage.saveScheme(name, this.filter.toJSON());
+            await this.storage.saveScheme(name, this.filter.toJSON(), '', this._dataVersion);
             this._toast(`方案 "${name}" 已保存`, 'success');
             this._hideModal();
         };
@@ -83,7 +86,15 @@ EnergyApp.App = class App {
             item.addEventListener('click', async (e) => {
                 if (e.target.classList.contains('scheme-delete')) return;
                 const scheme = await this.storage.getScheme(item.dataset.id);
-                if (scheme) { this.filter.fromJSON(scheme.filter); this._toast(`已加载 "${scheme.name}"`, 'success'); this._hideModal(); await this.dashboardController.init(); }
+                if (scheme) {
+                    if (scheme.dataVersion !== undefined && scheme.dataVersion !== this._dataVersion) {
+                        this._toast('数据已更新，方案中的筛选条件可能不适用', 'warning');
+                    }
+                    this.filter.fromJSON(scheme.filter);
+                    this._toast(`已加载 "${scheme.name}"`, 'success');
+                    this._hideModal();
+                    await this.dashboardController.init();
+                }
             });
         });
         document.querySelectorAll('.scheme-delete').forEach(btn => {

@@ -50,17 +50,19 @@ EnergyApp.Calculation = {
     getYoY(meterReadings, filter) {
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cy = now.getFullYear();
-        const current = this._sumByYear(meterReadings, cy);
-        const previous = this._sumByYear(meterReadings, cy - 1);
+        const base = this._filterReadingsNoDate(meterReadings, filter);
+        const current = this._sumByYear(base, cy);
+        const previous = this._sumByYear(base, cy - 1);
         return { current, previous, change: previous > 0 ? ((current - previous) / previous * 100) : 0, currentYear: cy, previousYear: cy - 1 };
     },
 
     getMoM(meterReadings, filter) {
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cm = now.getMonth(), cy = now.getFullYear();
-        const current = this._sumByMonth(meterReadings, cy, cm);
+        const base = this._filterReadingsNoDate(meterReadings, filter);
+        const current = this._sumByMonth(base, cy, cm);
         const pd = new Date(cy, cm - 1, 1);
-        const previous = this._sumByMonth(meterReadings, pd.getFullYear(), pd.getMonth());
+        const previous = this._sumByMonth(base, pd.getFullYear(), pd.getMonth());
         return { current, previous, change: previous > 0 ? ((current - previous) / previous * 100) : 0, currentMonth: cm + 1, previousMonth: pd.getMonth() + 1 };
     },
 
@@ -151,6 +153,14 @@ EnergyApp.Calculation = {
             yoy: this.getYoY(meterReadings, filter),
             mom: this.getMoM(meterReadings, filter)
         };
+    },
+
+    _filterReadingsNoDate(readings, filter) {
+        if (!readings) return [];
+        let f = readings;
+        if (filter.buildingId && filter.buildingId !== 'all') f = f.filter(r => r.building_id === filter.buildingId);
+        if (filter.energyType && filter.energyType !== 'all') f = f.filter(r => (r.energy_type || 'electricity') === filter.energyType);
+        return f;
     },
 
     _filterReadings(readings, filter) {

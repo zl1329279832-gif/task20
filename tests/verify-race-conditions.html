@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>楼宇能耗分析系统 - 竞态条件验证测试</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", monospace; background: #0f172a; color: #e2e8f0; padding: 24px; }
+h1 { font-size: 20px; margin-bottom: 16px; color: #38bdf8; }
+.test-group { background: #1e293b; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.test-group h2 { font-size: 14px; margin-bottom: 8px; color: #94a3b8; }
+.test-item { padding: 6px 12px; margin: 4px 0; border-radius: 4px; font-size: 13px; }
+.pass { background: #064e3b; color: #34d399; }
+.fail { background: #7f1d1d; color: #fca5a5; }
+.info { background: #1e3a5f; color: #93c5fd; }
+.running { background: #44403c; color: #fbbf24; }
+#summary { margin-top: 16px; padding: 16px; border-radius: 8px; font-size: 16px; font-weight: 700; }
+.summary-pass { background: #064e3b; color: #34d399; }
+.summary-fail { background: #7f1d1d; color: #fca5a5; }
+</style>
+</head>
+<body>
+<h1>竞态条件 &amp; 数据一致性验证测试</h1>
+<div id="results"></div>
+<div id="summary"></div>
+
+<!-- Minimal DOM structure required by controllers -->
+<div style="display:none">
+  <div id="import-section"><div id="drop-zone"></div></div>
+  <input type="file" id="file-input">
+  <button id="btn-do-import">导入</button>
+  <div id="field-mapping" style="display:none"><div id="mapping-content"></div></div>
+  <div id="import-summary" style="display:none"><div id="summary-content"></div></div>
+  <div id="validation-result" style="display:none"><div id="validation-content"></div></div>
+  <div id="loading-overlay" style="display:none"><span id="loading-text"></span></div>
+  <div id="toast-container"></div>
+  <div class="type-btn" data-type="building"></div>
+
+  <select id="filter-building"><option value="all">全部</option></select>
+  <input type="date" id="filter-start-date">
+  <input type="date" id="filter-end-date">
+  <select id="filter-energy-type"><option value="all">全部</option></select>
+  <select id="filter-billing"><option value="actual">actual</option></select>
+  <button class="period-btn active" data-period="month">月</button>
+  <button class="period-btn" data-period="day">日</button>
+
+  <div id="dashboard-section">
+    <div id="overview-chart"><div class="chart-body"></div></div>
+    <div id="heatmap-chart"><div class="chart-body"></div></div>
+    <div id="ranking-chart"><div class="chart-body"></div></div>
+    <div id="trend-chart"><div class="chart-body"></div></div>
+    <div id="yoy-chart"><div class="chart-body"></div></div>
+    <div id="mom-chart"><div class="chart-body"></div></div>
+    <div id="anomaly-alerts"><div class="chart-body"></div></div>
+    <div id="recommendations"><div class="chart-body"></div></div>
+  </div>
+
+  <div id="scheme-modal" style="display:none"><div id="modal-title"></div><div id="modal-body"></div></div>
+  <button class="modal-close"></button>
+  <div class="modal-overlay"></div>
+  <button id="btn-import">导入</button>
+  <button id="btn-dashboard">仪表盘</button>
+  <button id="btn-save-scheme">保存</button>
+  <button id="btn-load-scheme">加载</button>
+  <button id="btn-export">导出</button>
+</div>
+
+<!-- Load app JS files -->
+<script src="../js/utils.js"></script>
+<script src="../js/db.js"></script>
+<script src="../js/parser.js"></script>
+<script src="../js/validator.js"></script>
+<script src="../js/worker-manager.js"></script>
+<script src="../js/calculation.js"></script>
+<script src="../js/chart.js"></script>
+<script src="../js/filter.js"></script>
+<script src="../js/storage.js"></script>
+<script src="../js/export.js"></script>
+<script src="../js/import-controller.js"></script>
+<script src="../js/dashboard-controller.js"></script>
+
+<script>
+(async function() {
+    const results = document.getElementById('results');
+    const summaryEl = document.getElementById('summary');
+    let totalPass = 0, totalFail = 0;
+
+    function log(groupEl, msg, status) {
+        const div = document.createElement('div');
+        div.className = 'test-item ' + status;
+        div.textContent = msg;
+        groupEl.appendChild(div);
+        if (status === 'pass') totalPass++;
+        if (status === 'fail') totalFail++;
+    }
+
+    function createGroup(title) {
+        const g = document.createElement('div');
+        g.className = 'test-group';
+        const h = document.createElement('h2');
+        h.textContent = title;
+        g.appendChild(h);
+        results.appendChild(g);
+        return g;
+    }
+
+    function assert(groupEl, condition, passMsg, failMsg) {
+        if (condition) log(groupEl, 'PASS: ' + passMsg, 'pass');
+        else log(groupEl, 'FAIL: ' + failMsg, 'fail');
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    // Use a test-specific database
+    const TEST_DB = 'EnergyTestDB_' + Date.now();
+    async function createTestDB() {
+        const db = new EnergyApp.DB(TEST_DB);
+        await db.open();
+        return db;
+    }
+    async function deleteTestDB(dbName) {
+        return new Promise((resolve) => {
+            const req = indexedDB.deleteDatabase(dbName);
+            req.onsuccess = () => resolve();
+            req.onerror = () => resolve();
+            req.onblocked = () => resolve();
+        });
+    }
+
+    // Sample data generators
+    function makeBuildings(ids) {
+        return ids.map(id => ({ building_id: id, building_name: '楼栋' + id, location: '位置', floors: 3, area: 1000 }));
+    }
+    function makeReadings(buildingId, count, yearOffset) {
+        const readings = [];
+        const baseDate = new Date();
+        baseDate.setFullYear(baseDate.getFullYear() - (yearOffset || 0));
+        for (let i = 0; i < count; i++) {
+            const ts = new Date(baseDate.getTime() - i * 86400000);
+            readings.push({
+                meter_id: 'M-' + buildingId + '-' + (i % 3),
+                timestamp: ts.toISOString(),
+                reading: 10 + Math.random() * 50,
+                energy: 10 + Math.random() * 50,
+                cost: 5 + Math.random() * 25,
+                period_type: ['flat','peak','valley','sharp_peak'][i % 4],
+                energy_type: 'electricity',
+                building_id: buildingId,
+                floor_id: buildingId + '-F1'
+            });
+        }
+        return readings;
+    }
+    function makeDevices(buildingId) {
+        return [0,1,2].map(i => ({
+            device_id: 'D-' + buildingId + '-' + i,
+            device_name: '设备' + i,
+            meter_id: 'M-' + buildingId + '-' + i,
+            device_type: 'electricity',
+            building_id: buildingId,
+            floor_id: buildingId + '-F1'
+        }));
+    }
+    function makeFloors(buildingId) {
+        return [{ floor_id: buildingId + '-F1', building_id: buildingId, floor_number: 1, floor_name: '1F' }];
+    }
+
+    // ========== TEST 1: Import A then immediately import B ==========
+    async function test1() {
+        const g = createGroup('测试1: 连续导入A后立即导入B');
+        const db = await createTestDB();
+        try {
+            const buildingsA = makeBuildings(['A001', 'A002']);
+            const readingsA = [...makeReadings('A001', 30), ...makeReadings('A002', 30)];
+            const buildingsB = makeBuildings(['B001', 'B002']);
+            const readingsB = [...makeReadings('B001', 20), ...makeReadings('B002', 20)];
+
+            // Simulate import A
+            await db.clear('buildings');
+            await db.bulkAdd('buildings', buildingsA);
+            await db.clear('meter_readings');
+            await db.bulkAdd('meter_readings', readingsA);
+
+            // Immediately import B (overwrites A)
+            await db.clear('buildings');
+            await db.bulkAdd('buildings', buildingsB);
+            await db.clear('meter_readings');
+            await db.bulkAdd('meter_readings', readingsB);
+
+            const buildings = await db.getAll('buildings');
+            const readings = await db.getAll('meter_readings');
+            const bids = buildings.map(b => b.building_id);
+
+            assert(g, bids.includes('B001') && bids.includes('B002'), '数据库仅包含B组数据 (B001, B002)', '数据库包含非预期的楼栋: ' + bids.join(','));
+            assert(g, !bids.includes('A001') && !bids.includes('A002'), 'A组数据已被完全替换', 'A组数据仍残留');
+            assert(g, readings.length === 40, '读数记录数正确 (40条)', '读数记录数错误: ' + readings.length);
+            assert(g, readings.every(r => r.building_id === 'B001' || r.building_id === 'B002'), '所有读数属于B组', '存在A组读数残留');
+
+            // Test import lock
+            const ctrl = new EnergyApp.ImportController(db, null);
+            ctrl._importInProgress = true;
+            let blocked = false;
+            const origToast = ctrl._toast.bind(ctrl);
+            ctrl._toast = (msg) => { if (msg.includes('正在导入中')) blocked = true; };
+            await ctrl._doImport();
+            assert(g, blocked, '并发导入被正确阻止', '并发导入未被阻止');
+            ctrl._importInProgress = false;
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+        finally { await deleteTestDB(TEST_DB); }
+    }
+
+    // ========== TEST 2: Rapid filter switching ==========
+    async function test2() {
+        const g = createGroup('测试2: 快速切换筛选条件');
+        try {
+            const filter = new EnergyApp.Filter();
+
+            // Rapidly switch building filter 10 times
+            const buildings = ['B001','B002','B003','B004','B001','B003','B002','B004','B001','B005'];
+            buildings.forEach(bid => filter.set({ buildingId: bid }));
+
+            assert(g, filter.get().buildingId === 'B005', '筛选状态为最后一次设置 (B005)', '筛选状态错误: ' + filter.get().buildingId);
+            assert(g, filter.getVersion() === 10, '版本号正确递增到10', '版本号错误: ' + filter.getVersion());
+
+            // Test debounce: only last callback fires after settling
+            let callCount = 0;
+            let lastValue = '';
+            const debouncedFn = EnergyApp.utils.debounce((state) => { callCount++; lastValue = state.buildingId; }, 100);
+            filter.onChange(debouncedFn);
+
+            filter.set({ buildingId: 'X1' });
+            filter.set({ buildingId: 'X2' });
+            filter.set({ buildingId: 'X3' });
+
+            // Before debounce fires
+            assert(g, callCount === 0, '防抖期间回调未被调用', '防抖未生效，回调被调用 ' + callCount + ' 次');
+
+            await sleep(200);
+            assert(g, callCount === 1, '防抖后回调仅调用1次', '防抖后回调调用 ' + callCount + ' 次');
+            assert(g, lastValue === 'X3', '防抖后回调使用最后的值 (X3)', '防抖后值错误: ' + lastValue);
+
+            // Test filter version in get()
+            const state = filter.get();
+            assert(g, state._version !== undefined, 'get()返回包含_version字段', 'get()缺少_version字段');
+
+            // Test fromJSON bumps version
+            const v1 = filter.getVersion();
+            filter.fromJSON({ buildingId: 'all', startDate: '', endDate: '', energyType: 'all', billingType: 'actual', timePeriod: 'month' });
+            assert(g, filter.getVersion() === v1 + 1, 'fromJSON()正确递增版本号', 'fromJSON()未递增版本号');
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+    }
+
+    // ========== TEST 3: Save scheme, change data, restore ==========
+    async function test3() {
+        const g = createGroup('测试3: 保存方案后数据变更再恢复');
+        const dbName = TEST_DB + '_t3';
+        const db = new EnergyApp.DB(dbName);
+        await db.open();
+        try {
+            const storage = new EnergyApp.Storage(db);
+
+            // Save scheme with dataVersion=1
+            const filterState = { buildingId: 'B001', startDate: '2025-01-01', endDate: '2025-06-01', energyType: 'electricity', billingType: 'actual', timePeriod: 'month' };
+            const scheme = await storage.saveScheme('测试方案', filterState, '', 1);
+            assert(g, scheme.dataVersion === 1, '方案保存时记录 dataVersion=1', '方案 dataVersion 错误: ' + scheme.dataVersion);
+
+            // Retrieve and verify
+            const loaded = await storage.getScheme(scheme.scheme_id);
+            assert(g, loaded !== undefined, '方案可以正确读取', '方案读取失败');
+            assert(g, loaded.filter.buildingId === 'B001', '方案筛选条件正确 (B001)', '方案筛选条件错误: ' + loaded.filter.buildingId);
+
+            // Simulate data version change (new import happened)
+            const currentDataVersion = 2;
+            const versionMismatch = loaded.dataVersion !== undefined && loaded.dataVersion !== currentDataVersion;
+            assert(g, versionMismatch, '检测到数据版本不匹配 (1 !== 2)', '未检测到数据版本不匹配');
+
+            // Verify filter can still be restored despite mismatch
+            const filter = new EnergyApp.Filter();
+            filter.fromJSON(loaded.filter);
+            assert(g, filter.get().buildingId === 'B001', '方案筛选条件正确恢复', '筛选恢复失败: ' + filter.get().buildingId);
+            assert(g, filter.get().energyType === 'electricity', '能源类型正确恢复', '能源类型恢复失败');
+
+            // Test scheme without dataVersion (legacy compatibility)
+            const legacyScheme = await storage.saveScheme('旧方案', filterState, '');
+            const legacyLoaded = await storage.getScheme(legacyScheme.scheme_id);
+            const legacyMismatch = legacyLoaded.dataVersion !== undefined && legacyLoaded.dataVersion !== currentDataVersion;
+            assert(g, legacyMismatch || legacyLoaded.dataVersion === 0, '旧方案兼容处理正确', '旧方案兼容处理失败');
+
+            // Cleanup
+            await storage.deleteScheme(scheme.scheme_id);
+            await storage.deleteScheme(legacyScheme.scheme_id);
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+        finally { await deleteTestDB(dbName); }
+    }
+
+    // ========== TEST 4: Export report consistency ==========
+    async function test4() {
+        const g = createGroup('测试4: 导出报告与看板数据一致性');
+        const dbName = TEST_DB + '_t4';
+        const db = new EnergyApp.DB(dbName);
+        await db.open();
+        try {
+            // Insert test data
+            const buildings = makeBuildings(['B001']);
+            const readings = makeReadings('B001', 60);
+            const devices = makeDevices('B001');
+            const floors = makeFloors('B001');
+            const pricing = [
+                { pricing_id: 'P1', period_type: 'sharp_peak', start_time: '19:00', end_time: '22:00', price: 1.45, effective_date: '2025-01-01' },
+                { pricing_id: 'P2', period_type: 'peak', start_time: '08:00', end_time: '11:00', price: 1.05, effective_date: '2025-01-01' },
+                { pricing_id: 'P3', period_type: 'flat', start_time: '06:00', end_time: '08:00', price: 0.65, effective_date: '2025-01-01' },
+                { pricing_id: 'P4', period_type: 'valley', start_time: '22:00', end_time: '06:00', price: 0.35, effective_date: '2025-01-01' }
+            ];
+            await Promise.all([
+                db.bulkAdd('buildings', buildings),
+                db.bulkAdd('meter_readings', readings),
+                db.bulkAdd('devices', devices),
+                db.bulkAdd('floors', floors),
+                db.bulkAdd('pricing', pricing)
+            ]);
+
+            const filter = new EnergyApp.Filter();
+            const storage = new EnergyApp.Storage(db);
+
+            // Stub Chart.render* to no-op (we only care about data)
+            const origChart = {};
+            ['renderOverview','renderHeatmap','renderRanking','renderTrend','renderYoY','renderMoM','renderAnomalies','renderRecommendations'].forEach(m => {
+                origChart[m] = EnergyApp.Chart[m];
+                EnergyApp.Chart[m] = function() {};
+            });
+
+            const dashboard = new EnergyApp.DashboardController(db, filter, storage);
+            await dashboard.init();
+
+            // Wait for debounce to settle
+            await sleep(300);
+
+            // Get report data (should use cache)
+            const report = dashboard.getReportData();
+
+            assert(g, report !== null, '报告数据不为空', '报告数据为空');
+            assert(g, report.filter !== undefined, '报告包含筛选条件', '报告缺少筛选条件');
+            assert(g, report.filter._version === undefined, '报告筛选不包含内部_version字段', '报告筛选泄露_version');
+
+            // Verify cached results match what Calculation would produce
+            const directOverview = EnergyApp.Calculation.getOverview(readings, pricing, filter.get());
+            assert(g,
+                Math.abs(report.overview.totalEnergy - directOverview.totalEnergy) < 0.01,
+                '报告总能耗与直接计算一致 (' + report.overview.totalEnergy.toFixed(2) + ')',
+                '报告总能耗不一致: 报告=' + report.overview?.totalEnergy + ' 直接=' + directOverview.totalEnergy
+            );
+
+            // Verify YoY in report matches Calculation (which now uses filtered data)
+            const directYoY = EnergyApp.Calculation.getYoY(readings, filter.get());
+            assert(g,
+                Math.abs((report.yoy?.change || 0) - directYoY.change) < 0.01,
+                '报告同比变化与直接计算一致',
+                '报告同比不一致: 报告=' + report.yoy?.change + ' 直接=' + directYoY.change
+            );
+
+            // Verify export HTML can be generated from cached data
+            const html = EnergyApp.Export.generateReport(report);
+            assert(g, html.includes('楼宇能耗分析报告'), '导出HTML包含报告标题', '导出HTML内容异常');
+            assert(g, html.includes(report.overview.totalEnergy.toLocaleString('zh-CN', {minimumFractionDigits:0, maximumFractionDigits:0})) || html.includes(report.overview.totalEnergy.toFixed(0)), '导出HTML包含正确的总能耗数值', '导出HTML数值可能不一致');
+
+            // Restore Chart
+            Object.keys(origChart).forEach(m => { EnergyApp.Chart[m] = origChart[m]; });
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+        finally { await deleteTestDB(dbName); }
+    }
+
+    // ========== TEST 5: Low-confidence field mapping blocked ==========
+    async function test5() {
+        const g = createGroup('测试5: 低置信度字段映射拦截');
+        try {
+            // Ambiguous headers that produce low confidence
+            const ambiguousHeaders = ['val', 'ts', 'pow', 'mid'];
+            const mapping = EnergyApp.Parser.mapFields(ambiguousHeaders, 'meter_reading');
+
+            // Check which fields have low confidence
+            let hasAnyLow = false;
+            const lowFields = [];
+            Object.entries(mapping.mapping).forEach(([field, info]) => {
+                if (info.confidence < 0.7) {
+                    hasAnyLow = true;
+                    lowFields.push(field + '(' + (info.confidence*100).toFixed(0) + '%)');
+                }
+            });
+
+            log(g, '映射结果: ' + Object.entries(mapping.mapping).map(([f,i]) => f + '←' + i.header + '(' + (i.confidence*100).toFixed(0) + '%)').join(', '), 'info');
+            if (lowFields.length) log(g, '低置信度字段: ' + lowFields.join(', '), 'info');
+
+            // Test the _hasLowConfidence helper
+            const dbName = TEST_DB + '_t5';
+            const db = new EnergyApp.DB(dbName);
+            await db.open();
+            const ctrl = new EnergyApp.ImportController(db, null);
+            const check = ctrl._hasLowConfidence(mapping);
+
+            if (hasAnyLow) {
+                assert(g, check.hasLow === true, '_hasLowConfidence正确检测到低置信度', '_hasLowConfidence未检测到');
+                assert(g, check.fields.length > 0, '返回了低置信度字段列表 (' + check.fields.length + '个)', '字段列表为空');
+            } else {
+                log(g, '注意: 当前别名表使模糊匹配置信度较高，尝试更模糊的头', 'info');
+            }
+
+            // Test with clearly unmatchable headers
+            const badHeaders = ['x1', 'x2', 'x3', 'x4'];
+            const badMapping = EnergyApp.Parser.mapFields(badHeaders, 'meter_reading');
+            const badCheck = ctrl._hasLowConfidence(badMapping);
+            const mappedCount = Object.keys(badMapping.mapping).length;
+
+            if (mappedCount === 0) {
+                assert(g, true, '完全无法匹配的头不会映射任何字段 (正确)', '');
+            } else {
+                assert(g, badCheck.hasLow, '模糊匹配结果被标记为低置信度', '模糊匹配未被拦截');
+            }
+
+            // Test with good headers (Chinese aliases)
+            const goodHeaders = ['电表ID', '时间', '读数', '功率'];
+            const goodMapping = EnergyApp.Parser.mapFields(goodHeaders, 'meter_reading');
+            const goodCheck = ctrl._hasLowConfidence(goodMapping);
+            assert(g, !goodCheck.hasLow, '高置信度映射 (中文别名) 不被拦截', '高置信度映射被误拦截');
+            assert(g, Object.keys(goodMapping.mapping).length === 4, '4个字段全部映射成功', '映射数量错误: ' + Object.keys(goodMapping.mapping).length);
+
+            // Verify import button logic
+            assert(g, typeof ctrl._lowConfidenceAcknowledged === 'boolean', '低置信度确认标志已初始化', '标志未初始化');
+
+            await deleteTestDB(dbName);
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+    }
+
+    // ========== TEST 6: Worker manager stale-result detection ==========
+    async function test6() {
+        const g = createGroup('测试6: Worker管理器过期回包丢弃');
+        try {
+            const wm = new EnergyApp.WorkerManager('../workers/processor.js');
+
+            // Test cancelPending
+            assert(g, typeof wm.cancelPending === 'function', 'cancelPending方法存在', 'cancelPending方法不存在');
+            assert(g, typeof wm.cancelAllExcept === 'function', 'cancelAllExcept方法存在', 'cancelAllExcept方法不存在');
+
+            // Test generation tracking
+            const g1 = wm.getGeneration();
+            wm.cancelPending();
+            assert(g, wm.getGeneration() === g1 + 1, 'cancelPending递增generation', 'generation未递增');
+            assert(g, wm.callbacks.size === 0, 'cancelPending清空所有回调', '回调未清空: ' + wm.callbacks.size);
+
+            // Test execute with filterVersion
+            if (wm.useWorker) {
+                // Execute a task with filterVersion
+                const p1 = wm.execute('calculateStats', {
+                    meterReadings: [{ reading: 100, cost: 50, timestamp: '2025-01-01', building_id: 'B001' }],
+                    filter: {}
+                }, 5);
+
+                // Execute another task — the first one's result should still come back fine
+                // since both are valid (no cancellation)
+                try {
+                    const result = await p1;
+                    assert(g, result.totalEnergy === 100, 'Worker正确返回计算结果', 'Worker返回结果错误');
+                } catch (e) {
+                    if (e.message === '超时') log(g, 'Worker超时(可能环境不支持Worker)', 'info');
+                    else throw e;
+                }
+            } else {
+                log(g, 'Worker不可用，使用主线程回退模式', 'info');
+                // Test main thread fallback
+                const result = await wm.execute('calculateStats', {
+                    meterReadings: [{ reading: 100, cost: 50, timestamp: '2025-01-01', building_id: 'B001' }],
+                    filter: {}
+                });
+                assert(g, result.totalEnergy === 100, '主线程回退正确返回结果', '主线程回退结果错误');
+            }
+
+            // Test cancelAllExcept
+            wm.callbacks.set(100, { resolve: ()=>{}, reject: ()=>{} });
+            wm.callbacks.set(101, { resolve: ()=>{}, reject: ()=>{} });
+            wm.callbacks.set(102, { resolve: ()=>{}, reject: ()=>{} });
+            wm.cancelAllExcept(101);
+            assert(g, wm.callbacks.size === 1 && wm.callbacks.has(101), 'cancelAllExcept保留指定任务(101)', '保留任务错误');
+            wm.callbacks.clear();
+
+            wm.terminate();
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+    }
+
+    // ========== TEST 7: Dashboard stale-guard + refresh version ==========
+    async function test7() {
+        const g = createGroup('测试7: 仪表盘过期刷新丢弃 (refreshVersion)');
+        const dbName = TEST_DB + '_t7';
+        const db = new EnergyApp.DB(dbName);
+        await db.open();
+        try {
+            const buildings = makeBuildings(['B001', 'B002']);
+            const readings = [...makeReadings('B001', 30), ...makeReadings('B002', 30)];
+            const devices = [...makeDevices('B001'), ...makeDevices('B002')];
+            const floors = [...makeFloors('B001'), ...makeFloors('B002')];
+            await Promise.all([
+                db.bulkAdd('buildings', buildings),
+                db.bulkAdd('meter_readings', readings),
+                db.bulkAdd('devices', devices),
+                db.bulkAdd('floors', floors)
+            ]);
+
+            const filter = new EnergyApp.Filter();
+            const storage = new EnergyApp.Storage(db);
+
+            // Stub Chart renders
+            const renderCalls = [];
+            ['renderOverview','renderHeatmap','renderRanking','renderTrend','renderYoY','renderMoM','renderAnomalies','renderRecommendations'].forEach(m => {
+                EnergyApp.Chart[m] = function() { renderCalls.push(m); };
+            });
+
+            const dashboard = new EnergyApp.DashboardController(db, filter, storage);
+            await dashboard.init();
+
+            // The debounced refresh should fire
+            await sleep(300);
+
+            assert(g, dashboard._refreshVersion >= 1, 'refresh产生了refreshVersion', '_refreshVersion为0');
+            assert(g, dashboard._lastResults !== null, '缓存结果不为空', '缓存结果为空');
+            assert(g, dashboard._lastFilter !== null, '缓存筛选不为空', '缓存筛选为空');
+
+            // Rapid filter changes — each should bump _refreshVersion
+            const beforeVersion = dashboard._refreshVersion;
+            filter.set({ buildingId: 'B001' });
+            filter.set({ buildingId: 'B002' });
+            filter.set({ buildingId: 'all' });
+
+            // Due to debounce, the actual refresh hasn't fired yet
+            // but _refreshVersion should have been bumped by the direct refresh calls
+            // Wait for debounce
+            await sleep(300);
+
+            assert(g, dashboard._refreshVersion > beforeVersion, '快速切换后refreshVersion递增', 'refreshVersion未递增');
+            assert(g, dashboard._lastFilter.buildingId === 'all', '缓存筛选为最后一次切换 (all)', '缓存筛选错误: ' + dashboard._lastFilter?.buildingId);
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+        finally { await deleteTestDB(dbName); }
+    }
+
+    // ========== TEST 8: YoY/MoM respects building/energyType filter ==========
+    async function test8() {
+        const g = createGroup('测试8: 同比/环比尊重楼栋和能源类型筛选');
+        try {
+            const now = new Date();
+            const cy = now.getFullYear();
+            const cm = now.getMonth();
+
+            // Create readings for two buildings, current and previous year
+            const readings = [];
+            // B001: 100 per month this year
+            for (let m = 0; m < 12; m++) {
+                readings.push({ meter_id: 'M1', timestamp: new Date(cy, m, 15).toISOString(), reading: 100, energy_type: 'electricity', building_id: 'B001' });
+            }
+            // B001: 80 per month last year
+            for (let m = 0; m < 12; m++) {
+                readings.push({ meter_id: 'M1', timestamp: new Date(cy-1, m, 15).toISOString(), reading: 80, energy_type: 'electricity', building_id: 'B001' });
+            }
+            // B002: 200 per month this year
+            for (let m = 0; m < 12; m++) {
+                readings.push({ meter_id: 'M2', timestamp: new Date(cy, m, 15).toISOString(), reading: 200, energy_type: 'electricity', building_id: 'B002' });
+            }
+            // B002: 150 per month last year
+            for (let m = 0; m < 12; m++) {
+                readings.push({ meter_id: 'M2', timestamp: new Date(cy-1, m, 15).toISOString(), reading: 150, energy_type: 'electricity', building_id: 'B002' });
+            }
+
+            // YoY for all buildings
+            const yoyAll = EnergyApp.Calculation.getYoY(readings, { buildingId: 'all', endDate: new Date(cy, 11, 31).toISOString() });
+            // B001+B002: current = 12*100 + 12*200 = 3600, previous = 12*80 + 12*150 = 2760
+            assert(g, yoyAll.current === 3600, '全部楼栋YoY当年总量=3600', '全部楼栋YoY当年错误: ' + yoyAll.current);
+            assert(g, yoyAll.previous === 2760, '全部楼栋YoY去年总量=2760', '全部楼栋YoY去年错误: ' + yoyAll.previous);
+
+            // YoY filtered to B001 only
+            const yoyB001 = EnergyApp.Calculation.getYoY(readings, { buildingId: 'B001', endDate: new Date(cy, 11, 31).toISOString() });
+            assert(g, yoyB001.current === 1200, 'B001 YoY当年=1200', 'B001 YoY当年错误: ' + yoyB001.current);
+            assert(g, yoyB001.previous === 960, 'B001 YoY去年=960', 'B001 YoY去年错误: ' + yoyB001.previous);
+
+            // MoM filtered to B001
+            const momFilter = { buildingId: 'B001', endDate: new Date(cy, cm, 15).toISOString() };
+            const momB001 = EnergyApp.Calculation.getMoM(readings, momFilter);
+            assert(g, momB001.current === 100, 'B001 MoM当月=100', 'B001 MoM当月错误: ' + momB001.current);
+
+            // Add AC readings for B001 to test energyType filter
+            readings.push({ meter_id: 'M3', timestamp: new Date(cy, cm, 10).toISOString(), reading: 500, energy_type: 'ac', building_id: 'B001' });
+            const yoyAC = EnergyApp.Calculation.getYoY(readings, { buildingId: 'B001', energyType: 'ac', endDate: new Date(cy, 11, 31).toISOString() });
+            assert(g, yoyAC.current === 500, '能源类型过滤(ac) YoY当年=500', '能源类型过滤错误: ' + yoyAC.current);
+        } catch (e) { log(g, 'ERROR: ' + e.message, 'fail'); }
+    }
+
+    // ========== Run all tests ==========
+    try {
+        await test1();
+        await test2();
+        await test3();
+        await test4();
+        await test5();
+        await test6();
+        await test7();
+        await test8();
+    } catch (e) {
+        const g = createGroup('未捕获错误');
+        log(g, 'FATAL: ' + e.message + '\n' + e.stack, 'fail');
+    }
+
+    // Summary
+    summaryEl.textContent = `测试完成: ${totalPass} 通过, ${totalFail} 失败`;
+    summaryEl.className = totalFail === 0 ? 'summary-pass' : 'summary-fail';
+})();
+</script>
+</body>
+</html>

@@ -4,8 +4,16 @@ window.EnergyApp = window.EnergyApp || {};
 EnergyApp.Storage = class Storage {
     constructor(db) { this.db = db; }
 
-    async saveScheme(name, filterState, description = '') {
-        const scheme = { scheme_id: EnergyApp.utils.generateId(), name: name || '未命名方案', description, filter: filterState, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    async saveScheme(name, filterState, description = '', dataVersion = 0) {
+        const scheme = {
+            scheme_id: EnergyApp.utils.generateId(),
+            name: name || '未命名方案',
+            description,
+            filter: filterState,
+            dataVersion,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
         await this.db.put('schemes', scheme);
         return scheme;
     }

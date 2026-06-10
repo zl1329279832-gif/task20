@@ -5,9 +5,11 @@ EnergyApp.Filter = class Filter {
     constructor() {
         this.current = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all', billingType: 'actual', timePeriod: 'month' };
         this.listeners = [];
+        this._version = 0;
     }
-    get() { return { ...this.current }; }
-    set(updates) { Object.assign(this.current, updates); this.listeners.forEach(cb => cb(this.get())); }
+    get() { return { ...this.current, _version: this._version }; }
+    getVersion() { return this._version; }
+    set(updates) { Object.assign(this.current, updates); ++this._version; this.listeners.forEach(cb => cb(this.get())); }
     onChange(callback) { this.listeners.push(callback); }
 
     bindUI() {
@@ -51,6 +53,7 @@ EnergyApp.Filter = class Filter {
 
     fromJSON(json) {
         Object.assign(this.current, json);
+        ++this._version;
         const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
         setVal('filter-building', this.current.buildingId);
         setVal('filter-start-date', this.current.startDate);

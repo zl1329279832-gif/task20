@@ -2,7 +2,7 @@
 /* 在独立线程中运行，处理大数据量的解析、聚合和异常检测 */
 
 self.onmessage = function(e) {
-    const { type, taskId, payload } = e.data;
+    const { type, taskId, payload, filterVersion } = e.data;
     try {
         let result;
         switch (type) {
@@ -11,9 +11,9 @@ self.onmessage = function(e) {
             case 'calculateStats':  result = calculateStats(payload); break;
             default: throw new Error('未知任务类型: ' + type);
         }
-        self.postMessage({ taskId, result, error: null });
+        self.postMessage({ taskId, result, error: null, filterVersion });
     } catch (err) {
-        self.postMessage({ taskId, result: null, error: err.message });
+        self.postMessage({ taskId, result: null, error: err.message, filterVersion });
     }
 };
 
@@ -73,15 +73,16 @@ function aggregateData(p) {
     // 同比
     const now = filter.endDate ? new Date(filter.endDate) : new Date();
     const cy = now.getFullYear();
-    const curYear = readings.filter(r => new Date(r.timestamp).getFullYear() === cy).reduce((s, r) => s + (Number(r.reading) || 0), 0);
-    const prevYear = readings.filter(r => new Date(r.timestamp).getFullYear() === cy - 1).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const base = filterReadingsNoDate(readings, filter);
+    const curYear = base.filter(r => new Date(r.timestamp).getFullYear() === cy).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const prevYear = base.filter(r => new Date(r.timestamp).getFullYear() === cy - 1).reduce((s, r) => s + (Number(r.reading) || 0), 0);
     const yoy = { current: curYear, previous: prevYear, change: prevYear > 0 ? ((curYear - prevYear) / prevYear * 100) : 0, currentYear: cy, previousYear: cy - 1 };
 
     // 环比
     const cm = now.getMonth();
-    const curMonth = readings.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === cy && d.getMonth() === cm; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const curMonth = base.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === cy && d.getMonth() === cm; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
     const pm = new Date(cy, cm - 1, 1);
-    const prevMonth = readings.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === pm.getFullYear() && d.getMonth() === pm.getMonth(); }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    const prevMonth = base.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === pm.getFullYear() && d.getMonth() === pm.getMonth(); }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
     const mom = { current: curMonth, previous: prevMonth, change: prevMonth > 0 ? ((curMonth - prevMonth) / prevMonth * 100) : 0, currentMonth: cm + 1, previousMonth: pm.getMonth() + 1 };
 
     return { buildingTotals, floorHeatmap, deviceRanking, timeTrend, yoy, mom };
@@ -125,6 +126,14 @@ function calculateStats(p) {
     const totalEnergy = filtered.reduce((s, r) => s + (Number(r.reading) || 0), 0);
     const totalCost = filtered.reduce((s, r) => s + (Number(r.cost) || 0), 0);
     return { totalEnergy, totalCost };
+}
+
+function filterReadingsNoDate(readings, filter) {
+    if (!readings) return [];
+    let f = readings;
+    if (filter.buildingId && filter.buildingId !== 'all') f = f.filter(r => r.building_id === filter.buildingId);
+    if (filter.energyType && filter.energyType !== 'all') f = f.filter(r => (r.energy_type || 'electricity') === filter.energyType);
+    return f;
 }
 
 function filterReadings(readings, filter) {

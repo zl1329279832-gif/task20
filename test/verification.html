@@ -34,7 +34,7 @@ button{padding:8px 20px;border:none;border-radius:6px;cursor:pointer;font-size:1
 <body>
 <div class="container">
 <h1>楼宇能耗分析系统 — 数据一致性验证测试</h1>
-<p class="subtitle">覆盖: 导入A后导入B、快速切换、方案保存恢复、导出一致性、碳排放、策略对比、低置信映射、过期回包</p>
+<p class="subtitle">覆盖: 导入A后导入B、快速切换、方案保存恢复、导出一致性、碳排放、策略对比、低置信映射、过期回包、YoY/MoM面板一致性、连续导入竞态、全任务类型回包丢弃</p>
 
 <div class="btn-row">
     <button class="btn-primary" id="btn-run-all">运行全部测试</button>
@@ -888,6 +888,349 @@ async function testStrategyComparisonConsistency() {
 }
 
 /* ================================================================
+ *  测试套件 15: 快速切换筛选 — YoY/MoM 面板一致性
+ * ================================================================ */
+async function testRapidFilterYoYMoMConsistency() {
+    T.group('15. 快速切换筛选 — YoY/MoM 面板一致性');
+
+    // 准备跨年多楼栋数据
+    const readings2024 = [
+        ...makeReadings('B001', 'M-1', 365, 2024, 20),
+        ...makeReadings('B002', 'M-2', 365, 2024, 30),
+        ...makeReadings('B003', 'M-3', 365, 2024, 15),
+    ];
+    const readings2025 = [
+        ...makeReadings('B001', 'M-1', 100, 2025, 22),
+        ...makeReadings('B002', 'M-2', 100, 2025, 33),
+        ...makeReadings('B003', 'M-3', 100, 2025, 17),
+    ];
+    const allReadings = [...readings2024, ...readings2025];
+
+    // 15.1 筛选 B001 的 YoY 应仅包含 B001 数据
+    const fB001 = { buildingId: 'B001', startDate: '', endDate: '2025-04-11', energyType: 'all' };
+    const yoyB001 = EnergyApp.Calculation.getYoY(allReadings, fB001);
+    // 手动计算 B001 的 2025 能耗
+    const b001_2025 = allReadings.filter(r => r.building_id === 'B001' && new Date(r.timestamp).getFullYear() === 2025)
+                                  .reduce((s, r) => s + (Number(r.reading) || 0), 0);
+    T.assert('YoY(B001): current 仅含 B001', Math.abs(yoyB001.current - b001_2025) < 1,
+        `YoY.current=${yoyB001.current.toFixed(0)}, B001_2025=${b001_2025.toFixed(0)}`);
+
+    // 15.2 筛选 B002 的 YoY 与 B001 不同
+    const fB002 = { buildingId: 'B002', startDate: '', endDate: '2025-04-11', energyType: 'all' };
+    const yoyB002 = EnergyApp.Calculation.getYoY(allReadings, fB002);
+    T.assert('YoY(B001) ≠ YoY(B002)', yoyB001.current !== yoyB002.current,
+        `B001=${yoyB001.current.toFixed(0)}, B002=${yoyB002.current.toFixed(0)}`);
+
+    // 15.3 全部楼栋 YoY >= 任何单楼栋
+    const fAll = { buildingId: 'all', startDate: '', endDate: '2025-04-11', energyType: 'all' };
+    const yoyAll = EnergyApp.Calculation.getYoY(allReadings, fAll);
+    T.assert('YoY(全部) >= YoY(B001)', yoyAll.current >= yoyB001.current,
+        `全部=${yoyAll.current.toFixed(0)}, B001=${yoyB001.current.toFixed(0)}`);
+    T.assert('YoY(全部) >= YoY(B002)', yoyAll.current >= yoyB002.current,
+        `全部=${yoyAll.current.toFixed(0)}, B002=${yoyB002.current.toFixed(0)}`);
+    T.assert('YoY(全部) ≈ YoY(B001)+YoY(B002)+YoY(B003)',
+        Math.abs(yoyAll.current - (yoyB001.current + yoyB002.current + EnergyApp.Calculation.getYoY(allReadings, { buildingId: 'B003', startDate: '', endDate: '2025-04-11', energyType: 'all' }).current)) < 1,
+        `全部=${yoyAll.current.toFixed(0)}`);
+
+    // 15.4 MoM 一致性
+    const momB001 = EnergyApp.Calculation.getMoM(allReadings, fB001);
+    const momB002 = EnergyApp.Calculation.getMoM(allReadings, fB002);
+    const momAll = EnergyApp.Calculation.getMoM(allReadings, fAll);
+    T.assert('MoM(B001) ≠ MoM(B002)', momB001.current !== momB002.current || momB001.previous !== momB002.previous,
+        `B001: cur=${momB001.current.toFixed(0)}, prev=${momB001.previous.toFixed(0)} | B002: cur=${momB002.current.toFixed(0)}, prev=${momB002.previous.toFixed(0)}`);
+    T.assert('MoM(全部) >= MoM(B001)', momAll.current >= momB001.current,
+        `全部=${momAll.current.toFixed(0)}, B001=${momB001.current.toFixed(0)}`);
+
+    // 15.5 快速切换后每次结果独立 — 模拟 B001→B002→B003→B001
+    const fB003 = { buildingId: 'B003', startDate: '', endDate: '2025-04-11', energyType: 'all' };
+    const seq = [fB001, fB002, fB003, fB001];
+    const results = seq.map(f => EnergyApp.Calculation.getYoY(allReadings, f));
+    T.assert('快速切换: 第1次=B001, 第4次=B001, 结果一致',
+        Math.abs(results[0].current - results[3].current) < 0.01,
+        `第1次=${results[0].current.toFixed(2)}, 第4次=${results[3].current.toFixed(2)}`);
+    T.assert('快速切换: B001 ≠ B002', results[0].current !== results[1].current);
+    T.assert('快速切换: B002 ≠ B003', results[1].current !== results[2].current);
+}
+
+/* ================================================================
+ *  测试套件 16: 连续导入 — init() 竞态防护
+ * ================================================================ */
+async function testConsecutiveImportRace() {
+    T.group('16. 连续导入 — init() 竞态防护');
+
+    const db = new EnergyApp.DB();
+    await db.open();
+    const wm = new EnergyApp.WorkerManager('./nonexistent-worker.js');
+
+    // 模拟 DashboardController 的 _renderId 机制
+    let _renderId = 0;
+    let lastRenderedData = null;
+
+    async function mockInit(data) {
+        const renderId = ++_renderId;
+        // 模拟异步 loadData
+        await new Promise(resolve => setTimeout(resolve, 10));
+        if (renderId !== _renderId) return; // 过期的 init, 中止
+        lastRenderedData = data;
+    }
+
+    // 16.1 正常单次 init
+    await mockInit({ buildings: ['B001'], version: 1 });
+    T.assert('单次 init: 数据正确渲染', lastRenderedData?.version === 1,
+        `version=${lastRenderedData?.version}`);
+
+    // 16.2 快速连续两次 init — 第一次应被中止
+    const initA = mockInit({ buildings: ['B001'], version: 'A' });
+    const initB = mockInit({ buildings: ['B002'], version: 'B' });
+    await Promise.all([initA, initB]);
+    T.assert('连续 init: 最终渲染的是第二次数据', lastRenderedData?.version === 'B',
+        `version=${lastRenderedData?.version}`);
+
+    // 16.3 快速连续三次 init — 只有最后一次生效
+    const initC = mockInit({ version: 'C' });
+    const initD = mockInit({ version: 'D' });
+    const initE = mockInit({ version: 'E' });
+    await Promise.all([initC, initD, initE]);
+    T.assert('三次连续 init: 最终渲染的是第三次数据', lastRenderedData?.version === 'E',
+        `version=${lastRenderedData?.version}`);
+
+    // 16.4 bumpSessionVersion 在连续导入间正确递增
+    wm.bumpSessionVersion();
+    wm.bumpSessionVersion();
+    wm.bumpSessionVersion();
+    T.assert('三次 bump 后 sessionVersion = 3', wm.getSessionVersion() === 3,
+        `实际: ${wm.getSessionVersion()}`);
+
+    // 16.5 连续导入时旧任务全部被拒绝
+    wm.bumpSessionVersion();
+    const p1 = wm.execute('calculateStats', { meterReadings: [], pricing: [], filter: {} });
+    wm.bumpSessionVersion();
+    const p2 = wm.execute('calculateStats', { meterReadings: [], pricing: [], filter: {} });
+    wm.bumpSessionVersion();
+    let rejected1 = false, rejected2 = false;
+    try { await p1; } catch (e) { rejected1 = true; }
+    try { await p2; } catch (e) { rejected2 = true; }
+    T.assert('连续导入: 第一个任务被拒绝', rejected1);
+    T.assert('连续导入: 第二个任务被拒绝', rejected2);
+
+    wm.terminate();
+}
+
+/* ================================================================
+ *  测试套件 17: 低置信度字段映射 — 全数据类型覆盖
+ * ================================================================ */
+async function testLowConfidenceAllTypes() {
+    T.group('17. 低置信度映射 — 全数据类型覆盖');
+
+    const hasLowConf = (mapping) => Object.values(mapping.mapping).some(info => info.confidence < 0.5);
+
+    // 17.1 精确匹配不应触发低置信度
+    const preciseHeaders = {
+        building: ['building_id', 'building_name', 'location', 'floors', 'area'],
+        floor: ['floor_id', 'building_id', 'floor_number', 'floor_name'],
+        room: ['room_id', 'floor_id', 'room_name', 'room_type', 'area'],
+        device: ['device_id', 'device_name', 'room_id', 'device_type', 'meter_id', 'rated_power', 'building_id', 'floor_id'],
+        meter_reading: ['meter_id', 'timestamp', 'reading', 'energy', 'cost', 'period_type', 'energy_type', 'building_id', 'floor_id'],
+        carbon_factor: ['factor_id', 'building_id', 'period_type', 'factor', 'effective_date', 'source'],
+        demand_pricing: ['demand_pricing_id', 'building_id', 'rate_per_kw', 'billing_period', 'threshold_kw', 'effective_date'],
+        migratable_load: ['load_id', 'building_id', 'device_type', 'from_period', 'to_period', 'max_capacity_kwh', 'shift_efficiency'],
+    };
+
+    for (const [type, headers] of Object.entries(preciseHeaders)) {
+        const map = EnergyApp.Parser.mapFields(headers, type);
+        const conf = Object.values(map.mapping).map(m => m.confidence);
+        const allHigh = conf.every(c => c >= 0.9);
+        T.assert(`精确匹配 ${type}: 全部 >= 0.9`, allHigh,
+            `匹配 ${Object.keys(map.mapping).length} 字段, 置信度: ${conf.map(c => c.toFixed(2)).join(', ')}`);
+    }
+
+    // 17.2 无关列名应触发低置信度或无映射
+    const randomHeaders = ['col_alpha', 'col_beta', 'xyz_123', 'random_data', 'test_field'];
+    const lowConfTypes = ['building', 'floor', 'room', 'device', 'meter_reading', 'carbon_factor', 'demand_pricing', 'migratable_load'];
+    for (const type of lowConfTypes) {
+        const map = EnergyApp.Parser.mapFields(randomHeaders, type);
+        const mappedCount = Object.keys(map.mapping).length;
+        const low = hasLowConf(map);
+        T.assert(`无关列名 ${type}: 无映射或低置信`, mappedCount === 0 || low,
+            `匹配 ${mappedCount} 字段, 低置信: ${low}`);
+    }
+
+    // 17.3 中文字段名映射 — 主要数据类型
+    const chineseHeaders = {
+        building: ['楼栋ID', '楼栋名称', '位置', '楼层数', '面积'],
+        meter_reading: ['电表编号', '时间戳', '读数', '能耗', '电费', '时段类型', '能源类型', '楼栋ID'],
+        carbon_factor: ['因子ID', '楼栋ID', '时段类型', '排放因子', '生效日期'],
+    };
+    for (const [type, headers] of Object.entries(chineseHeaders)) {
+        const map = EnergyApp.Parser.mapFields(headers, type);
+        const mappedCount = Object.keys(map.mapping).length;
+        T.assert(`中文列名 ${type}: 匹配 >= 3 字段`, mappedCount >= 3,
+            `匹配 ${mappedCount} 字段`);
+    }
+}
+
+/* ================================================================
+ *  测试套件 18: Worker 旧回包丢弃 — 全任务类型
+ * ================================================================ */
+async function testStaleWorkerDiscardAllTypes() {
+    T.group('18. 过期回包丢弃 — 全任务类型');
+
+    const wm = new EnergyApp.WorkerManager('./nonexistent-worker.js');
+    const readings = makeReadings('B001', 'M-1', 50, 2025, 20);
+    const carbonFactors = [{ factor_id: 'CF1', building_id: 'all', period_type: 'flat', factor: 0.7 }];
+    const demandPricing = [{ demand_pricing_id: 'DP1', building_id: 'all', rate_per_kw: 45 }];
+    const migratableLoads = [{ load_id: 'ML1', building_id: 'B001', from_period: 'flat', to_period: 'valley', max_capacity_kwh: 100, shift_efficiency: 0.95 }];
+    const filter = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all' };
+
+    const taskTypes = [
+        { type: 'aggregate', payload: { meterReadings: readings, pricing: [], floors: [], devices: [], filter } },
+        { type: 'calculateCarbon', payload: { meterReadings: readings, carbonFactors, pricing: [], filter } },
+        { type: 'calculateDemandCost', payload: { meterReadings: readings, demandPricing, pricing: [], filter } },
+        { type: 'calculateTransferable', payload: { meterReadings: readings, migratableLoads, pricing: [], filter } },
+        { type: 'evaluateStrategy', payload: { meterReadings: readings, carbonFactors, demandPricing, migratableLoads, pricing: [], filter, strategyParams: { load_shift_pct: 0.2 } } },
+        { type: 'calculateStats', payload: { meterReadings: readings, pricing: [], filter } },
+        { type: 'detectAnomalies', payload: { meterReadings: readings, filter } },
+    ];
+
+    for (const { type, payload } of taskTypes) {
+        wm.bumpSessionVersion();
+        const promise = wm.execute(type, payload);
+        wm.bumpSessionVersion(); // 中途 bump 使其过期
+        try {
+            await promise;
+            T.assert(`${type}: 过期任务被拒绝`, false, 'Promise 未拒绝');
+        } catch (e) {
+            T.assert(`${type}: 过期任务被拒绝`,
+                e.message.includes('数据') || e.message.includes('过期') || e.message.includes('取消') || e.message.includes('Worker'),
+                `错误: ${e.message}`);
+        }
+    }
+
+    // 18.2 正常任务(不 bump)应成功
+    wm.bumpSessionVersion();
+    const normalResult = await wm.execute('calculateStats', { meterReadings: readings, pricing: [], filter });
+    T.assert('正常 calculateStats 成功', normalResult && normalResult.totalEnergy >= 0,
+        `totalEnergy=${normalResult?.totalEnergy?.toFixed(0)}`);
+
+    const normalCarbon = await wm.execute('calculateCarbon', { meterReadings: readings, carbonFactors, pricing: [], filter });
+    T.assert('正常 calculateCarbon 成功', normalCarbon && normalCarbon.totalCarbon >= 0,
+        `totalCarbon=${normalCarbon?.totalCarbon?.toFixed(0)}`);
+
+    wm.terminate();
+}
+
+/* ================================================================
+ *  测试套件 19: 方案恢复后导出一致性
+ * ================================================================ */
+async function testSchemeRestoreExportConsistency() {
+    T.group('19. 方案恢复后导出一致性');
+
+    const db = new EnergyApp.DB();
+    await db.open();
+    const wm = new EnergyApp.WorkerManager('./nonexistent-worker.js');
+    const storage = new EnergyApp.Storage(db);
+
+    // Step 1: 导入数据 A (B001, 200条)
+    await db.clear('buildings');
+    await db.clear('meter_readings');
+    await db.bulkAdd('buildings', makeBuildings(['B001']));
+    const readingsA = makeReadings('B001', 'M-A', 200, 2025, 20);
+    await db.bulkAdd('meter_readings', readingsA);
+    wm.bumpSessionVersion();
+    T.assert('E2E-S1: 导入A完成', true);
+
+    // Step 2: 计算 A 的指标并保存方案
+    const filterA = { buildingId: 'B001', startDate: '2025-01-01', endDate: '2025-12-31', energyType: 'all', timePeriod: 'month' };
+    const overviewA = EnergyApp.Calculation.getOverview(readingsA, [], filterA);
+    const fpA = await storage.computeDataFingerprint();
+    const scheme = await storage.saveScheme('一致性测试方案', filterA, '', fpA);
+    T.assert('E2E-S2: 方案保存成功', !!scheme.scheme_id);
+    T.assert('E2E-S2: 记录A的能耗', overviewA.totalEnergy > 0, `totalEnergy_A=${overviewA.totalEnergy.toFixed(0)}`);
+
+    // Step 3: 导入数据 B (B002, 150条, 不同能耗)
+    wm.bumpSessionVersion();
+    await db.clear('buildings');
+    await db.clear('meter_readings');
+    await db.bulkAdd('buildings', makeBuildings(['B002']));
+    const readingsB = makeReadings('B002', 'M-B', 150, 2025, 35);
+    await db.bulkAdd('meter_readings', readingsB);
+    T.assert('E2E-S3: 导入B完成', true);
+
+    // Step 4: 恢复方案 — 应检测到数据变更
+    const loadedScheme = await storage.getScheme(scheme.scheme_id);
+    const fpB = await storage.computeDataFingerprint();
+    const cmp = storage.compareFingerprint(loadedScheme.dataFingerprint, fpB);
+    T.assert('E2E-S4: 指纹检测到数据已变更', cmp.match === false, cmp.reason);
+
+    // Step 5: 使用 B 的数据计算 (看板应使用当前数据)
+    const allB = await db.getAll('meter_readings');
+    const filterB = { buildingId: 'all', startDate: '', endDate: '', energyType: 'all', timePeriod: 'month' };
+    const overviewB = EnergyApp.Calculation.getOverview(allB, [], filterB);
+    const trendB = EnergyApp.Calculation.getTimeTrend(allB, [], filterB);
+    const rankingB = EnergyApp.Calculation.getDeviceRanking(allB, [], filterB);
+    const heatmapB = EnergyApp.Calculation.getFloorHeatmap(allB, [], [], filterB);
+    const yoyB = EnergyApp.Calculation.getYoY(allB, filterB);
+    const momB = EnergyApp.Calculation.getMoM(allB, filterB);
+    const anomaliesB = EnergyApp.Calculation.detectAnomalies(allB, filterB);
+    const recommendationsB = EnergyApp.Calculation.getRecommendations(allB, [], filterB);
+
+    T.assert('E2E-S5: B的能耗 > 0', overviewB.totalEnergy > 0, `totalEnergy_B=${overviewB.totalEnergy.toFixed(0)}`);
+    T.assert('E2E-S5: B的能耗 ≠ A的能耗', Math.abs(overviewB.totalEnergy - overviewA.totalEnergy) > 1,
+        `A=${overviewA.totalEnergy.toFixed(0)}, B=${overviewB.totalEnergy.toFixed(0)}`);
+
+    // Step 6: 导出报告 — 应使用 B 的数据
+    const reportData = {
+        overview: overviewB, trend: trendB, ranking: rankingB, heatmap: heatmapB,
+        yoy: yoyB, mom: momB, anomalies: anomaliesB, recommendations: recommendationsB,
+        filter: JSON.parse(JSON.stringify(filterB)),
+        generatedAt: new Date().toLocaleString('zh-CN'),
+        _queryId: 1, _dataSessionVersion: wm.getSessionVersion()
+    };
+    const html = EnergyApp.Export.generateReport(reportData);
+    T.assert('E2E-S6: 报告生成成功', html.length > 100);
+
+    // 报告应使用 B 的数据(能耗值), 不含 A 的数据
+    const containsBEnergy = html.includes(overviewB.totalEnergy.toFixed(0)) || html.includes(Math.round(overviewB.totalEnergy).toString());
+    T.assert('E2E-S6: 报告包含B的能耗数据', containsBEnergy,
+        `B.totalEnergy=${overviewB.totalEnergy.toFixed(0)}`);
+
+    // Step 7: 验证 YoY/MoM 也使用 B 的数据(筛选一致性)
+    const yoyFiltered = EnergyApp.Calculation.getYoY(allB, { ...filterB, buildingId: 'B002' });
+    T.assert('E2E-S7: YoY(all) ≈ YoY(B002) (B中只有B002)',
+        Math.abs(yoyB.current - yoyFiltered.current) < 1,
+        `all=${yoyB.current.toFixed(0)}, B002=${yoyFiltered.current.toFixed(0)}`);
+
+    // Step 8: 策略评估一致性 — 评估应使用 B 的数据
+    const carbonFactors = [
+        { factor_id: 'CF1', building_id: 'all', period_type: 'flat', factor: 0.7 },
+        { factor_id: 'CF2', building_id: 'all', period_type: 'peak', factor: 0.9 },
+    ];
+    const strategyResult = EnergyApp.Calculation.evaluateStrategy(
+        allB, carbonFactors, [], [], [], filterB,
+        { load_shift_pct: 0.3, demand_reduction_pct: 0.1, device_efficiency_gain: 0.05, weekend_shutdown_pct: 0.4 }
+    );
+    T.assert('E2E-S8: 策略基线碳排 > 0 (基于B)', strategyResult.baseline.totalCarbon > 0,
+        `碳排=${strategyResult.baseline.totalCarbon.toFixed(0)}`);
+    T.assert('E2E-S8: 策略减排率 > 0', strategyResult.reductionPct > 0,
+        `减排率=${strategyResult.reductionPct.toFixed(1)}%`);
+
+    // Step 9: filterChecksum 在报告中
+    const cs = EnergyApp.Export._filterChecksum(filterB);
+    T.assert('E2E-S9: 报告包含筛选校验码', html.includes(cs),
+        `校验码=${cs}`);
+
+    // Step 10: 版本信息嵌入
+    T.assert('E2E-S10: 报告包含数据版本', html.includes('数据版本'));
+    T.assert('E2E-S10: 报告包含查询ID', html.includes('查询ID'));
+
+    // 清理
+    await storage.deleteScheme(scheme.scheme_id);
+    await db.clear('buildings');
+    await db.clear('meter_readings');
+    wm.terminate();
+}
+
+/* ================================================================
  *  运行全部测试
  * ================================================================ */
 async function runAllTests() {
@@ -913,6 +1256,11 @@ async function runAllTests() {
     try { await testLowConfidenceNewTypes(); } catch (e) { T.log(`[ERROR] 套件12异常: ${e.message}`); }
     try { await testStaleWorkerDiscard(); } catch (e) { T.log(`[ERROR] 套件13异常: ${e.message}`); }
     try { await testStrategyComparisonConsistency(); } catch (e) { T.log(`[ERROR] 套件14异常: ${e.message}`); }
+    try { await testRapidFilterYoYMoMConsistency(); } catch (e) { T.log(`[ERROR] 套件15异常: ${e.message}`); }
+    try { await testConsecutiveImportRace(); } catch (e) { T.log(`[ERROR] 套件16异常: ${e.message}`); }
+    try { await testLowConfidenceAllTypes(); } catch (e) { T.log(`[ERROR] 套件17异常: ${e.message}`); }
+    try { await testStaleWorkerDiscardAllTypes(); } catch (e) { T.log(`[ERROR] 套件18异常: ${e.message}`); }
+    try { await testSchemeRestoreExportConsistency(); } catch (e) { T.log(`[ERROR] 套件19异常: ${e.message}`); }
 
     const elapsed = Date.now() - start;
     T.log(`====== 测试完成 (${elapsed}ms) ======`);

@@ -48,19 +48,21 @@ EnergyApp.Calculation = {
     },
 
     getYoY(meterReadings, filter) {
+        const filtered = this._filterReadings(meterReadings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cy = now.getFullYear();
-        const current = this._sumByYear(meterReadings, cy);
-        const previous = this._sumByYear(meterReadings, cy - 1);
+        const current = this._sumByYear(filtered, cy);
+        const previous = this._sumByYear(filtered, cy - 1);
         return { current, previous, change: previous > 0 ? ((current - previous) / previous * 100) : 0, currentYear: cy, previousYear: cy - 1 };
     },
 
     getMoM(meterReadings, filter) {
+        const filtered = this._filterReadings(meterReadings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cm = now.getMonth(), cy = now.getFullYear();
-        const current = this._sumByMonth(meterReadings, cy, cm);
+        const current = this._sumByMonth(filtered, cy, cm);
         const pd = new Date(cy, cm - 1, 1);
-        const previous = this._sumByMonth(meterReadings, pd.getFullYear(), pd.getMonth());
+        const previous = this._sumByMonth(filtered, pd.getFullYear(), pd.getMonth());
         return { current, previous, change: previous > 0 ? ((current - previous) / previous * 100) : 0, currentMonth: cm + 1, previousMonth: pd.getMonth() + 1 };
     },
 

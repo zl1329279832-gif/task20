@@ -84,10 +84,16 @@ EnergyApp.StrategyManager = class StrategyManager {
             strategyParams: strategy.parameters
         };
 
+        /* 记录发起评估时的数据代次, 用于回退路径校验 */
+        const sessionBefore = this.worker.getSessionVersion();
         let result;
         try {
             result = await this.worker.execute('evaluateStrategy', payload, { queryScoped: true });
         } catch (e) {
+            /* 如果数据代次已变更(新的导入发生), 不再回退到主线程, 直接抛出 */
+            if (this.worker.getSessionVersion() !== sessionBefore) {
+                throw new Error('数据已更新，策略评估已取消: ' + e.message);
+            }
             // Worker 失败时使用主线程结果
             result = EnergyApp.Calculation.evaluateStrategy(
                 payload.meterReadings, payload.carbonFactors, payload.demandPricing,

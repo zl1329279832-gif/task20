@@ -29,6 +29,7 @@ EnergyApp.DashboardController = class DashboardController {
         this._cachedReportData = null;           // 缓存: 供导出使用, 保证与看板一致
         this._dataSessionVersion = 0;            // 数据加载时的 sessionVersion
         this._refreshTimer = null;               // 防抖定时器
+        this._renderId = 0;                       // init() 竞态防护: 每次 init 递增, loadData 后校验
 
         this.filter.onChange(() => this._debouncedRefresh());
     }
@@ -40,7 +41,10 @@ EnergyApp.DashboardController = class DashboardController {
     }
 
     async init() {
+        const renderId = ++this._renderId;
         await this.loadData();
+        /* 如果在 loadData 期间又触发了新的 init (如连续导入), 旧 init 在此中止 */
+        if (renderId !== this._renderId) return;
         this.refresh();
     }
 
@@ -73,6 +77,8 @@ EnergyApp.DashboardController = class DashboardController {
 
     refresh() {
         const queryId = ++this._queryId;
+        /* 同步推进 WorkerManager 的筛选代次, 使过期的 Worker 查询失效 */
+        if (this.workerManager) this.workerManager.bumpQueryId();
         const filter = this.filter.get();
 
         /* 快照当前筛选条件, 用于后续一致性校验 */
@@ -169,25 +175,27 @@ EnergyApp.DashboardController = class DashboardController {
     }
 
     _monthlyYoY(readings, filter) {
+        const filtered = EnergyApp.Calculation._filterReadings(readings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cy = now.getFullYear();
         const months = [];
         for (let m = 0; m < 12; m++) {
-            const cur = EnergyApp.Calculation._sumByMonth(readings, cy, m);
-            const prev = EnergyApp.Calculation._sumByMonth(readings, cy - 1, m);
+            const cur = EnergyApp.Calculation._sumByMonth(filtered, cy, m);
+            const prev = EnergyApp.Calculation._sumByMonth(filtered, cy - 1, m);
             if (cur > 0 || prev > 0) months.push({ month: `${m+1}月`, current: cur, previous: prev });
         }
         return months;
     }
 
     _dailyMoM(readings, filter) {
+        const filtered = EnergyApp.Calculation._filterReadings(readings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const y = now.getFullYear(), m = now.getMonth();
         const days = new Date(y, m + 1, 0).getDate();
         const daily = [];
         for (let d = 1; d <= days; d++) {
             const s = new Date(y, m, d), e = new Date(y, m, d, 23, 59, 59);
-            const energy = readings.filter(r => { const t = new Date(r.timestamp); return t >= s && t <= e; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+            const energy = filtered.filter(r => { const t = new Date(r.timestamp); return t >= s && t <= e; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
             if (energy > 0) daily.push({ day: d, energy });
         }
         return daily;

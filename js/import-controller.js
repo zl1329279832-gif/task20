@@ -10,6 +10,7 @@ EnergyApp.ImportController = class ImportController {
         this.parsedData = null;
         this.currentMapping = null;
         this.importId = 0;                   // 每次成功导入递增, 供外部感知
+        this._importing = false;             // 导入并发锁: 防止两次导入交叉执行
         this.dropZone = document.getElementById('drop-zone');
         this.fileInput = document.getElementById('file-input');
         this.importBtn = document.getElementById('btn-do-import');
@@ -29,6 +30,7 @@ EnergyApp.ImportController = class ImportController {
     }
 
     async _handleFiles(files) {
+        if (this._importing) { this._toast('正在导入中，请稍候', 'warning'); return; }
         this._showLoading('解析文件中...');
         try {
             const results = [];
@@ -149,6 +151,10 @@ EnergyApp.ImportController = class ImportController {
             return;
         }
 
+        /* ===== 并发锁: 防止重叠导入 ===== */
+        if (this._importing) { this._toast('正在导入中，请稍候', 'warning'); return; }
+        this._importing = true;
+
         this._showLoading('正在导入...');
         try {
             for (const r of this.parsedData) {
@@ -169,7 +175,7 @@ EnergyApp.ImportController = class ImportController {
             this.importBtn.style.opacity = '';
             if (this.onImportComplete) this.onImportComplete();
         } catch (err) { this._toast('导入失败: ' + err.message, 'error'); }
-        finally { this._hideLoading(); }
+        finally { this._hideLoading(); this._importing = false; }
     }
 
     _showLoading(text) { document.getElementById('loading-text').textContent = text || '处理中...'; document.getElementById('loading-overlay').style.display = 'flex'; }

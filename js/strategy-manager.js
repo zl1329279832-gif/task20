@@ -88,7 +88,12 @@ EnergyApp.StrategyManager = class StrategyManager {
         try {
             result = await this.worker.execute('evaluateStrategy', payload, { queryScoped: true });
         } catch (e) {
-            // Worker 失败时使用主线程结果
+            /* 修复: 版本过期(数据/筛选代次不匹配)时不应回退到主线程,
+               否则会用旧数据产生过期结果并写入策略 */
+            if (e.message && (e.message.includes('代次过期') || e.message.includes('数据已更新'))) {
+                throw e;
+            }
+            // 仅在 Worker 不可用/超时等非版本问题时回退到主线程
             result = EnergyApp.Calculation.evaluateStrategy(
                 payload.meterReadings, payload.carbonFactors, payload.demandPricing,
                 payload.migratableLoads, payload.pricing, payload.filter, payload.strategyParams

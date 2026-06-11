@@ -29,6 +29,7 @@ EnergyApp.DashboardController = class DashboardController {
         this._cachedReportData = null;           // 缓存: 供导出使用, 保证与看板一致
         this._dataSessionVersion = 0;            // 数据加载时的 sessionVersion
         this._refreshTimer = null;               // 防抖定时器
+        this._loading = false;                   // loadData 进行中标志, 防止用旧数据渲染
 
         this.filter.onChange(() => this._debouncedRefresh());
     }
@@ -45,6 +46,7 @@ EnergyApp.DashboardController = class DashboardController {
     }
 
     async loadData() {
+        this._loading = true;
         try {
             const [buildings, floors, rooms, devices, readings, ac, lighting, pricing, carbonFactors, demandPricing, migratableLoads] = await Promise.all([
                 this.db.getAll('buildings'), this.db.getAll('floors'), this.db.getAll('rooms'),
@@ -63,6 +65,7 @@ EnergyApp.DashboardController = class DashboardController {
             /* 数据变了, 旧缓存无效 */
             this._cachedReportData = null;
         } catch (err) { console.error('加载数据失败:', err); }
+        finally { this._loading = false; }
     }
 
     /* ---- 标记数据已过期(外部导入后调用) ---- */
@@ -72,7 +75,11 @@ EnergyApp.DashboardController = class DashboardController {
     }
 
     refresh() {
+        /* 修复: loadData 进行中时跳过, 防止用旧数据渲染; loadData 完成后 init 会再调 refresh */
+        if (this._loading) return;
         const queryId = ++this._queryId;
+        /* 修复: 同步推进 Worker 层筛选代次, 使旧的 queryScoped 任务过期 */
+        if (this.workerManager) this.workerManager.bumpQueryId();
         const filter = this.filter.get();
 
         /* 快照当前筛选条件, 用于后续一致性校验 */
@@ -169,25 +176,31 @@ EnergyApp.DashboardController = class DashboardController {
     }
 
     _monthlyYoY(readings, filter) {
+        /* 修复: 先按 buildingId/energyType 筛选, 再做月度同比明细 */
+        const filtered = EnergyApp.Calculation._filterReadings(readings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cy = now.getFullYear();
         const months = [];
         for (let m = 0; m < 12; m++) {
-            const cur = EnergyApp.Calculation._sumByMonth(readings, cy, m);
-            const prev = EnergyApp.Calculation._sumByMonth(readings, cy - 1, m);
+            const cur = filtered.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === cy && d.getMonth() === m; })
+                                .reduce((s, r) => s + (Number(r.reading) || 0), 0);
+            const prev = filtered.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === cy - 1 && d.getMonth() === m; })
+                                 .reduce((s, r) => s + (Number(r.reading) || 0), 0);
             if (cur > 0 || prev > 0) months.push({ month: `${m+1}月`, current: cur, previous: prev });
         }
         return months;
     }
 
     _dailyMoM(readings, filter) {
+        /* 修复: 先按 buildingId/energyType 筛选, 再做日度环比明细 */
+        const filtered = EnergyApp.Calculation._filterReadings(readings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const y = now.getFullYear(), m = now.getMonth();
         const days = new Date(y, m + 1, 0).getDate();
         const daily = [];
         for (let d = 1; d <= days; d++) {
             const s = new Date(y, m, d), e = new Date(y, m, d, 23, 59, 59);
-            const energy = readings.filter(r => { const t = new Date(r.timestamp); return t >= s && t <= e; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
+            const energy = filtered.filter(r => { const t = new Date(r.timestamp); return t >= s && t <= e; }).reduce((s, r) => s + (Number(r.reading) || 0), 0);
             if (energy > 0) daily.push({ day: d, energy });
         }
         return daily;
@@ -214,7 +227,15 @@ EnergyApp.DashboardController = class DashboardController {
     /* 强制从当前数据构建报告(兜底) */
     _buildReportData() {
         const filter = this.filter.get();
-        const { readings, pricing, floors, devices } = this.data;
+        const { readings, pricing, floors, devices, carbonFactors, demandPricing, migratableLoads } = this.data;
+        const carbonData = EnergyApp.Calculation.calculateCarbon(readings, carbonFactors || [], pricing || [], filter);
+        const demandCost = EnergyApp.Calculation.calculateDemandCost(readings, demandPricing || [], pricing || [], filter);
+        const transferable = EnergyApp.Calculation.calculateTransferableLoad(readings, migratableLoads || [], pricing || [], filter);
+        let strategyComparison = null;
+        if (this.strategyManager) {
+            const compData = this.strategyManager.getComparisonData();
+            if (compData.length > 0) strategyComparison = compData;
+        }
         return {
             overview: EnergyApp.Calculation.getOverview(readings, pricing, filter),
             trend: EnergyApp.Calculation.getTimeTrend(readings, pricing, filter),
@@ -224,8 +245,11 @@ EnergyApp.DashboardController = class DashboardController {
             mom: EnergyApp.Calculation.getMoM(readings, filter),
             anomalies: EnergyApp.Calculation.detectAnomalies(readings, filter),
             recommendations: EnergyApp.Calculation.getRecommendations(readings, pricing, filter),
+            carbonData, demandCost, transferable, strategyComparison,
             filter: JSON.parse(JSON.stringify(filter)),
-            generatedAt: new Date().toLocaleString('zh-CN')
+            generatedAt: new Date().toLocaleString('zh-CN'),
+            _queryId: this._queryId,
+            _dataSessionVersion: this._dataSessionVersion
         };
     }
 };

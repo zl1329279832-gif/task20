@@ -48,19 +48,27 @@ EnergyApp.Calculation = {
     },
 
     getYoY(meterReadings, filter) {
+        /* 修复: 同比必须先按 buildingId/energyType 等筛选, 与 processor.js 保持一致 */
+        const filtered = this._filterReadings(meterReadings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cy = now.getFullYear();
-        const current = this._sumByYear(meterReadings, cy);
-        const previous = this._sumByYear(meterReadings, cy - 1);
+        const current = filtered.filter(r => new Date(r.timestamp).getFullYear() === cy)
+                                .reduce((s, r) => s + (Number(r.reading) || 0), 0);
+        const previous = filtered.filter(r => new Date(r.timestamp).getFullYear() === cy - 1)
+                                 .reduce((s, r) => s + (Number(r.reading) || 0), 0);
         return { current, previous, change: previous > 0 ? ((current - previous) / previous * 100) : 0, currentYear: cy, previousYear: cy - 1 };
     },
 
     getMoM(meterReadings, filter) {
+        /* 修复: 环比必须先按 buildingId/energyType 等筛选, 与 processor.js 保持一致 */
+        const filtered = this._filterReadings(meterReadings, filter);
         const now = filter.endDate ? new Date(filter.endDate) : new Date();
         const cm = now.getMonth(), cy = now.getFullYear();
-        const current = this._sumByMonth(meterReadings, cy, cm);
+        const current = filtered.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === cy && d.getMonth() === cm; })
+                                .reduce((s, r) => s + (Number(r.reading) || 0), 0);
         const pd = new Date(cy, cm - 1, 1);
-        const previous = this._sumByMonth(meterReadings, pd.getFullYear(), pd.getMonth());
+        const previous = filtered.filter(r => { const d = new Date(r.timestamp); return d.getFullYear() === pd.getFullYear() && d.getMonth() === pd.getMonth(); })
+                                 .reduce((s, r) => s + (Number(r.reading) || 0), 0);
         return { current, previous, change: previous > 0 ? ((current - previous) / previous * 100) : 0, currentMonth: cm + 1, previousMonth: pd.getMonth() + 1 };
     },
 
